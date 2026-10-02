@@ -11,7 +11,10 @@ import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -60,8 +63,8 @@ public class MainActivity extends Activity {
     private static final int PANEL = Color.argb(52, 255, 255, 255);
     private static final int AMBER = Color.rgb(255, 197, 122);
     private static final int AMBER_SOFT = Color.argb(80, 255, 173, 86);
-    private static final int ROSE = Color.rgb(178, 73, 83);
-    private static final int ROSE_SOFT = Color.argb(78, 255, 120, 134);
+    private static final int ROSE = Color.rgb(255, 154, 142);
+    private static final int ROSE_SOFT = Color.argb(92, 255, 116, 102);
     private static final DateTimeFormatter BREW_TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm");
     private static final String[] BEAN_TYPES = {
             "铁皮卡 / Typica",
@@ -187,8 +190,8 @@ public class MainActivity extends Activity {
         nav.setPadding(dp(6), dp(5), dp(6), dp(7));
         nav.setBackground(round(Color.argb(88, 36, 28, 24), dp(22), Color.argb(92, 255, 255, 255)));
         addNav(nav, "beans", "◎", "图鉴");
-        addNav(nav, "brew", "☕", "喝一杯");
         addNav(nav, "stock", "▣", "库存");
+        addNav(nav, "brew", "☕", "喝一杯");
         addNav(nav, "stats", "◌", "统计");
         addNav(nav, "alerts", "!", "提醒");
         return nav;
@@ -291,7 +294,12 @@ public class MainActivity extends Activity {
         LinearLayout names = new LinearLayout(this);
         names.setOrientation(LinearLayout.VERTICAL);
         names.setPadding(dp(12), 0, 0, 0);
-        names.addView(text(bean.name, 20, INK, true));
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        titleRow.addView(text(bean.name, 20, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
+        titleRow.addView(stockRing(bean), new LinearLayout.LayoutParams(dp(48), dp(48)));
+        names.addView(titleRow);
         TextView meta = text(bean.roaster + " · " + bean.beanType + " · " + bean.origin + " · " + bean.process, 12, MUTED, false);
         meta.setPadding(0, dp(3), 0, 0);
         names.addView(meta);
@@ -324,11 +332,6 @@ public class MainActivity extends Activity {
                 AMBER_SOFT,
                 AMBER);
         card.addView(metrics);
-
-        ProgressBar bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        bar.setMax((int) Math.max(bean.totalGram, 1));
-        bar.setProgress((int) Math.max(0, bean.remainingGram));
-        card.addView(bar, new LinearLayout.LayoutParams(-1, dp(10)));
 
         LinearLayout recipe = new LinearLayout(this);
         recipe.setOrientation(LinearLayout.HORIZONTAL);
@@ -402,22 +405,7 @@ public class MainActivity extends Activity {
         }
         brewBeanId = pick.id;
 
-        LinearLayout top = new LinearLayout(this);
-        top.setOrientation(LinearLayout.HORIZONTAL);
-        top.setGravity(Gravity.CENTER_VERTICAL);
-        top.setPadding(dp(4), dp(14), dp(4), dp(6));
-        TextView cancel = text("取消", 14, MUTED, true);
-        cancel.setOnClickListener(v -> {
-            tab = "beans";
-            render();
-        });
-        top.addView(cancel, new LinearLayout.LayoutParams(0, dp(40), 1));
-        TextView title = text("记录一杯", 20, INK, true);
-        title.setGravity(Gravity.CENTER);
-        top.addView(title, new LinearLayout.LayoutParams(0, dp(40), 1));
-        TextView blank = text("", 14, MUTED, true);
-        top.addView(blank, new LinearLayout.LayoutParams(0, dp(40), 1));
-        content.addView(top);
+        pageTitle("喝一杯", "记录这一杯的参数、风味和具体冲煮时段");
 
         final Bean currentPick = pick;
         BrewInputs inputs = new BrewInputs();
@@ -494,7 +482,7 @@ public class MainActivity extends Activity {
             if (isConsumed(bean)) finished.add(bean);
             else active.add(bean);
         }
-        content.addView(stockOverview(active), fullMargin());
+        content.addView(stockOverview(active, finished), fullMargin());
         content.addView(stockConsumptionCard(), fullMargin());
 
         addStockSection("优先处理", active, "priority");
@@ -504,15 +492,17 @@ public class MainActivity extends Activity {
         addStockSection("已消耗完", finished, "consumed");
     }
 
-    private View stockOverview(List<Bean> beans) {
+    private View stockOverview(List<Bean> beans, List<Bean> finished) {
         int totalCups = 0;
         int golden = 0;
         int low = 0;
+        int resting = 0;
         double totalGram = 0;
         for (Bean bean : beans) {
             totalCups += bestRecipeCups(bean);
             totalGram += bean.remainingGram;
             if ("黄金期".equals(drinkingWindow(bean))) golden++;
+            if ("养豆中".equals(drinkingWindow(bean))) resting++;
             if (bean.remainingGram < 45) low++;
         }
 
@@ -527,6 +517,8 @@ public class MainActivity extends Activity {
         grid.addView(compactStat("还可冲", totalCups + " 杯", GREEN_SOFT, GREEN_DARK, LINE));
         grid.addView(compactStat("黄金期", golden + " 款", AMBER_SOFT, AMBER, LINE));
         grid.addView(compactStat("总余量", fmt(totalGram) + "g", ROSE_SOFT, ROSE, LINE));
+        grid.addView(compactStat("养豆中", resting + " 款", AMBER_SOFT, AMBER, LINE));
+        grid.addView(compactStat("已消耗完", finished.size() + " 款", CREAM, MUTED, LINE));
         box.addView(grid);
 
         LinearLayout legend = new LinearLayout(this);
@@ -701,7 +693,7 @@ public class MainActivity extends Activity {
 
     private void renderStats() {
         Stats s = db.stats();
-        sectionTitle("消耗统计", "看见偏好、成本和复购候选");
+        pageTitle("统计", "从库存、冲煮、评分和时段里看见喝豆习惯");
 
         GridLayout grid = new GridLayout(this);
         grid.setColumnCount(2);
@@ -710,6 +702,11 @@ public class MainActivity extends Activity {
         grid.addView(statCard("本月消耗", fmt(s.monthUsed) + "g"));
         grid.addView(statCard("平均评分", s.avgScore > 0 ? String.format(Locale.CHINA, "%.1f", s.avgScore) : "-"));
         content.addView(grid, fullMargin());
+
+        content.addView(barChartCard("近 7 天消耗", "每天消耗的粉量", db.dailyConsumption(7), "g"), fullMargin());
+        content.addView(barChartCard("冲煮方式", "不同器具的使用频次", db.methodCounts(), "杯"), fullMargin());
+        content.addView(hourChartCard(db.hourCounts()), fullMargin());
+        content.addView(barChartCard("评分分布", "这段时间的满意度集中在哪", db.scoreBuckets(), "杯"), fullMargin());
 
         sectionTitle("复购候选", "高分且记录次数更多的豆子会排在前面");
         for (String line : db.rebuyCandidates()) {
@@ -1293,6 +1290,94 @@ public class MainActivity extends Activity {
         lp.setMargins(dp(3), dp(4), dp(3), dp(4));
         card.setLayoutParams(lp);
         return card;
+    }
+
+    private View barChartCard(String title, String sub, List<ChartItem> items, String unit) {
+        LinearLayout box = card();
+        box.setPadding(dp(14), dp(14), dp(14), dp(14));
+        box.addView(text(title, 17, INK, true));
+        TextView subtitle = text(sub, 12, MUTED, false);
+        subtitle.setPadding(0, dp(2), 0, dp(10));
+        box.addView(subtitle);
+        double max = 0;
+        for (ChartItem item : items) max = Math.max(max, item.value);
+        if (items.isEmpty() || max <= 0) {
+            box.addView(text("暂无足够数据", 13, MUTED, true));
+            return box;
+        }
+        for (ChartItem item : items) {
+            box.addView(barChartRow(item.label, item.value, max, unit));
+        }
+        return box;
+    }
+
+    private View barChartRow(String label, double value, double max, String unit) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(5), 0, dp(5));
+
+        TextView labelView = text(label, 12, MUTED, true);
+        row.addView(labelView, new LinearLayout.LayoutParams(dp(64), -2));
+
+        LinearLayout track = new LinearLayout(this);
+        track.setOrientation(LinearLayout.HORIZONTAL);
+        track.setGravity(Gravity.CENTER_VERTICAL);
+        track.setBackground(round(CREAM, dp(10), Color.TRANSPARENT));
+        View fill = new View(this);
+        fill.setBackground(round(GREEN_SOFT, dp(10), Color.TRANSPARENT));
+        int fillWidth = Math.max(dp(12), (int) ((getResources().getDisplayMetrics().widthPixels - dp(178)) * (value / max)));
+        track.addView(fill, new LinearLayout.LayoutParams(fillWidth, dp(12)));
+        row.addView(track, new LinearLayout.LayoutParams(0, dp(14), 1));
+
+        TextView valueView = text(formatChartValue(value) + unit, 12, INK, true);
+        valueView.setGravity(Gravity.RIGHT);
+        row.addView(valueView, new LinearLayout.LayoutParams(dp(62), -2));
+        return row;
+    }
+
+    private View hourChartCard(List<ChartItem> items) {
+        LinearLayout box = card();
+        box.setPadding(dp(14), dp(14), dp(14), dp(14));
+        box.addView(text("冲煮时段", 17, INK, true));
+        TextView subtitle = text("按小时聚合，后面可以继续分析高频时段", 12, MUTED, false);
+        subtitle.setPadding(0, dp(2), 0, dp(10));
+        box.addView(subtitle);
+        GridLayout grid = new GridLayout(this);
+        grid.setColumnCount(4);
+        double max = 0;
+        for (ChartItem item : items) max = Math.max(max, item.value);
+        for (ChartItem item : items) grid.addView(hourCell(item, max));
+        box.addView(grid);
+        return box;
+    }
+
+    private View hourCell(ChartItem item, double max) {
+        LinearLayout cell = new LinearLayout(this);
+        cell.setOrientation(LinearLayout.VERTICAL);
+        cell.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        cell.setPadding(dp(4), dp(6), dp(4), dp(5));
+        cell.setBackground(round(PANEL, dp(10), LINE));
+        int barHeight = max <= 0 ? dp(6) : Math.max(dp(6), (int) (dp(46) * item.value / max));
+        View bar = new View(this);
+        bar.setBackground(round(item.value > 0 ? GREEN_SOFT : CREAM, dp(7), Color.TRANSPARENT));
+        cell.addView(bar, new LinearLayout.LayoutParams(dp(18), barHeight));
+        TextView label = text(item.label, 10, MUTED, true);
+        label.setGravity(Gravity.CENTER);
+        cell.addView(label);
+        TextView value = text(formatChartValue(item.value), 10, INK, true);
+        value.setGravity(Gravity.CENTER);
+        cell.addView(value);
+        GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
+        lp.width = (getResources().getDisplayMetrics().widthPixels - dp(76)) / 4;
+        lp.setMargins(dp(3), dp(3), dp(3), dp(3));
+        cell.setLayoutParams(lp);
+        return cell;
+    }
+
+    private String formatChartValue(double value) {
+        if (Math.abs(value - Math.round(value)) < 0.05) return String.valueOf((int) Math.round(value));
+        return String.format(Locale.CHINA, "%.1f", value);
     }
 
     private View alertCard(String alert) {
@@ -1897,6 +1982,11 @@ public class MainActivity extends Activity {
         return line;
     }
 
+    private View stockRing(Bean bean) {
+        double consumed = bean.totalGram <= 0 ? 0 : Math.max(0, Math.min(1, (bean.totalGram - bean.remainingGram) / bean.totalGram));
+        return new RingView(this, consumed, GREEN, CREAM, INK, String.format(Locale.CHINA, "%.0f%%", consumed * 100));
+    }
+
     private LinearLayout batchList(Bean bean) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -1926,12 +2016,16 @@ public class MainActivity extends Activity {
     }
 
     private void pageTitle(String title, String sub) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(16), dp(16), dp(16), dp(14));
+        box.setBackground(round(Color.argb(68, 255, 255, 255), dp(16), LINE));
         TextView t = text(title, 28, INK, true);
-        t.setPadding(dp(4), dp(14), 0, 0);
-        content.addView(t);
+        box.addView(t);
         TextView s = text(sub, 13, MUTED, false);
-        s.setPadding(dp(4), dp(4), 0, dp(12));
-        content.addView(s);
+        s.setPadding(0, dp(4), 0, 0);
+        box.addView(s);
+        content.addView(box, fullMargin());
     }
 
     private String shortBeanType(String raw) {
@@ -2370,6 +2464,49 @@ public class MainActivity extends Activity {
         return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
     }
 
+    class RingView extends View {
+        private final double progress;
+        private final int arcColor;
+        private final int trackColor;
+        private final int textColor;
+        private final String label;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        RingView(Context context, double progress, int arcColor, int trackColor, int textColor, String label) {
+            super(context);
+            this.progress = Math.max(0, Math.min(1, progress));
+            this.arcColor = arcColor;
+            this.trackColor = trackColor;
+            this.textColor = textColor;
+            this.label = label;
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            int size = Math.min(getWidth(), getHeight());
+            float stroke = dp(5);
+            float inset = stroke / 2f + dp(2);
+            RectF oval = new RectF(inset, inset, size - inset, size - inset);
+
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(stroke);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setColor(trackColor);
+            canvas.drawArc(oval, -90, 360, false, paint);
+            paint.setColor(arcColor);
+            canvas.drawArc(oval, -90, (float) (progress * 360), false, paint);
+
+            paint.setStyle(Paint.Style.FILL);
+            paint.setTextAlign(Paint.Align.CENTER);
+            paint.setTypeface(Typeface.DEFAULT_BOLD);
+            paint.setTextSize(dp(10));
+            paint.setColor(textColor);
+            Paint.FontMetrics fm = paint.getFontMetrics();
+            canvas.drawText(label, size / 2f, size / 2f - (fm.ascent + fm.descent) / 2f, paint);
+        }
+    }
+
     static class Bean {
         long id;
         String name;
@@ -2484,6 +2621,16 @@ public class MainActivity extends Activity {
     static class RecipeStock {
         String method;
         int cups;
+    }
+
+    static class ChartItem {
+        String label;
+        double value;
+
+        ChartItem(String label, double value) {
+            this.label = label;
+            this.value = value;
+        }
     }
 
     static class BrewInputs {
@@ -2811,6 +2958,79 @@ public class MainActivity extends Activity {
             if (c.moveToFirst()) total = c.getDouble(0);
             c.close();
             return total;
+        }
+
+        List<ChartItem> dailyConsumption(int days) {
+            List<ChartItem> out = new ArrayList<>();
+            LocalDate start = LocalDate.now().minusDays(Math.max(1, days) - 1);
+            for (int i = 0; i < days; i++) {
+                LocalDate day = start.plusDays(i);
+                out.add(new ChartItem(String.format(Locale.CHINA, "%02d/%02d", day.getMonthValue(), day.getDayOfMonth()), 0));
+            }
+            Cursor c = getReadableDatabase().rawQuery(
+                    "SELECT date, COALESCE(SUM(dose),0) FROM brews WHERE date >= ? GROUP BY date ORDER BY date",
+                    new String[]{start.toString()});
+            while (c.moveToNext()) {
+                String date = c.getString(0);
+                double value = c.getDouble(1);
+                LocalDate day = parse(date);
+                String label = String.format(Locale.CHINA, "%02d/%02d", day.getMonthValue(), day.getDayOfMonth());
+                for (ChartItem item : out) if (item.label.equals(label)) item.value = value;
+            }
+            c.close();
+            return out;
+        }
+
+        List<ChartItem> methodCounts() {
+            List<ChartItem> out = new ArrayList<>();
+            Cursor c = getReadableDatabase().rawQuery("SELECT method, COUNT(*) FROM brews GROUP BY method ORDER BY COUNT(*) DESC, method LIMIT 6", null);
+            while (c.moveToNext()) out.add(new ChartItem(clean(c.getString(0), "未记录"), c.getInt(1)));
+            c.close();
+            return out;
+        }
+
+        List<ChartItem> hourCounts() {
+            List<ChartItem> out = new ArrayList<>();
+            int[] counts = new int[24];
+            Cursor c = getReadableDatabase().rawQuery("SELECT brew_time FROM brews WHERE brew_time IS NOT NULL AND brew_time != ''", null);
+            while (c.moveToNext()) {
+                try {
+                    String raw = cleanBrewTime(c.getString(0));
+                    int hour = Integer.parseInt(raw.substring(0, 2));
+                    if (hour >= 0 && hour < 24) counts[hour]++;
+                } catch (Exception ignored) {
+                }
+            }
+            c.close();
+            for (int hour = 0; hour < 24; hour += 3) {
+                int total = 0;
+                for (int i = hour; i < hour + 3; i++) total += counts[i];
+                out.add(new ChartItem(String.format(Locale.CHINA, "%02d-%02d", hour, hour + 2), total));
+            }
+            return out;
+        }
+
+        List<ChartItem> scoreBuckets() {
+            double[] buckets = new double[5];
+            Cursor c = getReadableDatabase().rawQuery("SELECT score FROM brews", null);
+            while (c.moveToNext()) {
+                double score = c.getDouble(0);
+                int index;
+                if (score < 2) index = 0;
+                else if (score < 3) index = 1;
+                else if (score < 4) index = 2;
+                else if (score < 4.5) index = 3;
+                else index = 4;
+                buckets[index]++;
+            }
+            c.close();
+            List<ChartItem> out = new ArrayList<>();
+            out.add(new ChartItem("<2", buckets[0]));
+            out.add(new ChartItem("2-3", buckets[1]));
+            out.add(new ChartItem("3-4", buckets[2]));
+            out.add(new ChartItem("4-4.5", buckets[3]));
+            out.add(new ChartItem("4.5+", buckets[4]));
+            return out;
         }
 
         double totalConsumedFromStock() {
