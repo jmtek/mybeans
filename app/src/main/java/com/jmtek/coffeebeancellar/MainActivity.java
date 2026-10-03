@@ -187,37 +187,42 @@ public class MainActivity extends Activity {
     private View nav() {
         LinearLayout nav = new LinearLayout(this);
         nav.setOrientation(LinearLayout.HORIZONTAL);
-        nav.setPadding(dp(6), dp(5), dp(6), dp(7));
-        nav.setBackground(round(Color.argb(88, 36, 28, 24), dp(22), Color.argb(92, 255, 255, 255)));
-        addNav(nav, "beans", "◎", "图鉴");
-        addNav(nav, "stock", "▣", "库存");
-        addNav(nav, "brew", "☕", "喝一杯");
-        addNav(nav, "stats", "◌", "统计");
-        addNav(nav, "alerts", "!", "提醒");
+        nav.setPadding(dp(6), dp(4), dp(6), dp(5));
+        nav.setGravity(Gravity.CENTER_VERTICAL);
+        nav.setBackground(round(Color.argb(96, 36, 28, 24), dp(24), Color.argb(102, 255, 255, 255)));
+        addNav(nav, "beans", "◎", "我的豆", false);
+        addNav(nav, "stock", "▣", "剩多少", false);
+        addNav(nav, "brew", "☕", "喝一杯", true);
+        addNav(nav, "stats", "◌", "算一算", false);
+        addNav(nav, "alerts", "!", "注意啦", false);
         return nav;
     }
 
-    private void addNav(LinearLayout nav, String key, String icon, String label) {
+    private void addNav(LinearLayout nav, String key, String icon, String label, boolean center) {
         boolean active = key.equals(tab);
         LinearLayout item = new LinearLayout(this);
         item.setOrientation(LinearLayout.VERTICAL);
         item.setGravity(Gravity.CENTER);
-        item.setPadding(0, dp(2), 0, 0);
-        item.setBackground(round(active ? Color.argb(170, 34, 157, 139) : Color.TRANSPARENT, dp(18), active ? Color.argb(80, 255, 255, 255) : 0));
+        item.setPadding(0, center ? dp(1) : dp(2), 0, 0);
+        int fill = center
+                ? (active ? Color.argb(230, 34, 157, 139) : Color.argb(150, 255, 197, 122))
+                : (active ? Color.argb(170, 34, 157, 139) : Color.TRANSPARENT);
+        int stroke = active || center ? Color.argb(center ? 128 : 80, 255, 255, 255) : 0;
+        item.setBackground(round(fill, dp(center ? 24 : 18), stroke));
         item.setOnClickListener(v -> {
             tab = key;
             render();
         });
 
-        TextView glyph = text(icon, 20, active ? Color.WHITE : MUTED, true);
+        TextView glyph = text(icon, center ? 30 : 20, center ? Color.WHITE : (active ? Color.WHITE : MUTED), true);
         glyph.setGravity(Gravity.CENTER);
-        TextView copy = text(label, 11, active ? Color.WHITE : MUTED, active);
+        TextView copy = text(label, center ? 12 : 11, active || center ? Color.WHITE : MUTED, active || center);
         copy.setGravity(Gravity.CENTER);
-        item.addView(glyph, new LinearLayout.LayoutParams(-1, dp(24)));
+        item.addView(glyph, new LinearLayout.LayoutParams(-1, dp(center ? 33 : 24)));
         item.addView(copy, new LinearLayout.LayoutParams(-1, dp(20)));
 
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -1, 1);
-        lp.setMargins(dp(2), 0, dp(2), 0);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, center ? dp(64) : -1, center ? 1.22f : 1f);
+        lp.setMargins(dp(center ? 4 : 2), center ? 0 : dp(6), dp(center ? 4 : 2), center ? 0 : dp(6));
         nav.addView(item, lp);
     }
 
@@ -693,7 +698,7 @@ public class MainActivity extends Activity {
 
     private void renderStats() {
         Stats s = db.stats();
-        pageTitle("统计", "从库存、冲煮、评分和时段里看见喝豆习惯");
+        pageTitle("算一算", "从库存、冲煮、评分、豆种和烘焙度里看见喝豆习惯");
 
         GridLayout grid = new GridLayout(this);
         grid.setColumnCount(2);
@@ -705,7 +710,9 @@ public class MainActivity extends Activity {
 
         content.addView(barChartCard("近 7 天消耗", "每天消耗的粉量", db.dailyConsumption(7), "g"), fullMargin());
         content.addView(barChartCard("冲煮方式", "不同器具的使用频次", db.methodCounts(), "杯"), fullMargin());
-        content.addView(hourChartCard(db.hourCounts()), fullMargin());
+        content.addView(barChartCard("烘焙度分布", "按当前豆子库存批次统计", db.roastLevelCounts(), "款"), fullMargin());
+        content.addView(barChartCard("豆种分布", "按当前豆子库存批次统计", db.beanTypeCounts(), "款"), fullMargin());
+        content.addView(timeColumnChartCard(db.hourCounts()), fullMargin());
         content.addView(barChartCard("评分分布", "这段时间的满意度集中在哪", db.scoreBuckets(), "杯"), fullMargin());
 
         sectionTitle("复购候选", "高分且记录次数更多的豆子会排在前面");
@@ -1336,42 +1343,71 @@ public class MainActivity extends Activity {
         return row;
     }
 
-    private View hourChartCard(List<ChartItem> items) {
+    private View timeColumnChartCard(List<ChartItem> items) {
         LinearLayout box = card();
         box.setPadding(dp(14), dp(14), dp(14), dp(14));
         box.addView(text("冲煮时段", 17, INK, true));
-        TextView subtitle = text("按小时聚合，后面可以继续分析高频时段", 12, MUTED, false);
+        TextView subtitle = text("横坐标为时间段，纵坐标为冲煮杯数", 12, MUTED, false);
         subtitle.setPadding(0, dp(2), 0, dp(10));
         box.addView(subtitle);
-        GridLayout grid = new GridLayout(this);
-        grid.setColumnCount(4);
         double max = 0;
         for (ChartItem item : items) max = Math.max(max, item.value);
-        for (ChartItem item : items) grid.addView(hourCell(item, max));
-        box.addView(grid);
+
+        LinearLayout chart = new LinearLayout(this);
+        chart.setOrientation(LinearLayout.HORIZONTAL);
+        chart.setGravity(Gravity.BOTTOM);
+        chart.setPadding(0, dp(8), 0, 0);
+
+        LinearLayout yAxis = new LinearLayout(this);
+        yAxis.setOrientation(LinearLayout.VERTICAL);
+        yAxis.setGravity(Gravity.CENTER_HORIZONTAL);
+        TextView top = text(max > 0 ? formatChartValue(max) : "0", 10, MUTED, true);
+        top.setGravity(Gravity.CENTER);
+        yAxis.addView(top, new LinearLayout.LayoutParams(-1, dp(20)));
+        View axis = new View(this);
+        axis.setBackgroundColor(LINE);
+        yAxis.addView(axis, new LinearLayout.LayoutParams(dp(1), dp(86)));
+        TextView zero = text("0", 10, MUTED, true);
+        zero.setGravity(Gravity.CENTER);
+        yAxis.addView(zero, new LinearLayout.LayoutParams(-1, dp(18)));
+        chart.addView(yAxis, new LinearLayout.LayoutParams(dp(28), -2));
+
+        LinearLayout columns = new LinearLayout(this);
+        columns.setOrientation(LinearLayout.HORIZONTAL);
+        columns.setGravity(Gravity.BOTTOM);
+        columns.setBackground(round(Color.argb(30, 255, 255, 255), dp(12), LINE));
+        columns.setPadding(dp(6), dp(7), dp(6), dp(6));
+        for (ChartItem item : items) columns.addView(timeColumn(item, max), new LinearLayout.LayoutParams(0, -2, 1));
+        chart.addView(columns, new LinearLayout.LayoutParams(0, -2, 1));
+        box.addView(chart);
         return box;
     }
 
-    private View hourCell(ChartItem item, double max) {
+    private View timeColumn(ChartItem item, double max) {
         LinearLayout cell = new LinearLayout(this);
         cell.setOrientation(LinearLayout.VERTICAL);
         cell.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        cell.setPadding(dp(4), dp(6), dp(4), dp(5));
-        cell.setBackground(round(PANEL, dp(10), LINE));
-        int barHeight = max <= 0 ? dp(6) : Math.max(dp(6), (int) (dp(46) * item.value / max));
-        View bar = new View(this);
-        bar.setBackground(round(item.value > 0 ? GREEN_SOFT : CREAM, dp(7), Color.TRANSPARENT));
-        cell.addView(bar, new LinearLayout.LayoutParams(dp(18), barHeight));
-        TextView label = text(item.label, 10, MUTED, true);
-        label.setGravity(Gravity.CENTER);
-        cell.addView(label);
+        cell.setPadding(dp(2), 0, dp(2), 0);
+
         TextView value = text(formatChartValue(item.value), 10, INK, true);
         value.setGravity(Gravity.CENTER);
-        cell.addView(value);
-        GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
-        lp.width = (getResources().getDisplayMetrics().widthPixels - dp(76)) / 4;
-        lp.setMargins(dp(3), dp(3), dp(3), dp(3));
-        cell.setLayoutParams(lp);
+        cell.addView(value, new LinearLayout.LayoutParams(-1, dp(18)));
+
+        int barHeight = max <= 0 || item.value <= 0 ? dp(5) : Math.max(dp(10), (int) (dp(78) * item.value / max));
+        LinearLayout barSlot = new LinearLayout(this);
+        barSlot.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        View bar = new View(this);
+        bar.setBackground(round(item.value > 0 ? GREEN_SOFT : CREAM, dp(6), Color.TRANSPARENT));
+        barSlot.addView(bar, new LinearLayout.LayoutParams(dp(18), barHeight));
+        cell.addView(barSlot, new LinearLayout.LayoutParams(-1, dp(82)));
+
+        View tick = new View(this);
+        tick.setBackgroundColor(LINE);
+        cell.addView(tick, new LinearLayout.LayoutParams(dp(1), dp(6)));
+
+        TextView label = text(item.label, 9, MUTED, true);
+        label.setGravity(Gravity.CENTER);
+        cell.addView(label, new LinearLayout.LayoutParams(-1, dp(24)));
         return cell;
     }
 
@@ -2989,6 +3025,22 @@ public class MainActivity extends Activity {
             return out;
         }
 
+        List<ChartItem> roastLevelCounts() {
+            List<ChartItem> out = new ArrayList<>();
+            Cursor c = getReadableDatabase().rawQuery("SELECT roast_level, COUNT(*) FROM beans GROUP BY roast_level ORDER BY COUNT(*) DESC, roast_level LIMIT 6", null);
+            while (c.moveToNext()) out.add(new ChartItem(clean(c.getString(0), "未知烘焙"), c.getInt(1)));
+            c.close();
+            return out;
+        }
+
+        List<ChartItem> beanTypeCounts() {
+            List<ChartItem> out = new ArrayList<>();
+            Cursor c = getReadableDatabase().rawQuery("SELECT bean_type, COUNT(*) FROM beans GROUP BY bean_type ORDER BY COUNT(*) DESC, bean_type LIMIT 6", null);
+            while (c.moveToNext()) out.add(new ChartItem(shortBeanType(clean(c.getString(0), DEFAULT_BEAN_TYPE)), c.getInt(1)));
+            c.close();
+            return out;
+        }
+
         List<ChartItem> hourCounts() {
             List<ChartItem> out = new ArrayList<>();
             int[] counts = new int[24];
@@ -3008,6 +3060,14 @@ public class MainActivity extends Activity {
                 out.add(new ChartItem(String.format(Locale.CHINA, "%02d-%02d", hour, hour + 2), total));
             }
             return out;
+        }
+
+        private String shortBeanType(String raw) {
+            String value = clean(raw, DEFAULT_BEAN_TYPE);
+            int slash = value.indexOf("/");
+            if (slash > 0) value = value.substring(0, slash).trim();
+            if (value.length() > 8) value = value.substring(0, 8);
+            return value;
         }
 
         List<ChartItem> scoreBuckets() {
