@@ -47,6 +47,8 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final int PICK_BEAN_IMAGES = 301;
@@ -92,8 +94,14 @@ public class MainActivity extends Activity {
     private FrameLayout shell;
     private String tab = "beans";
     private long brewBeanId = -1;
+    private boolean beanGalleryMode = false;
+    private String beanTypeFilter = "全部";
+    private String roastFilter = "全部";
+    private String processFilter = "全部";
+    private String roasterFilter = "全部";
     private ImageUploadField pendingImageField;
     private LruCache<String, Bitmap> imageCache;
+    private final ExecutorService imageExecutor = Executors.newFixedThreadPool(2);
 
     @Override
     protected void onCreate(Bundle state) {
@@ -229,16 +237,17 @@ public class MainActivity extends Activity {
     private void renderBeans() {
         content.addView(beansHero(), fullMargin());
 
+        content.addView(beanBrowseControls(), fullMargin());
+
         List<Bean> active = new ArrayList<>();
         List<Bean> finished = new ArrayList<>();
         for (Bean bean : db.beanGroups()) {
+            if (!matchesBeanFilter(bean)) continue;
             if (isConsumed(bean)) finished.add(bean);
             else active.add(bean);
         }
 
-        for (Bean bean : active) {
-            content.addView(beanCard(bean), fullMargin());
-        }
+        addBeanCards(active);
         addConsumedBeanSection(finished);
     }
 
@@ -254,7 +263,7 @@ public class MainActivity extends Activity {
 
         LinearLayout copy = new LinearLayout(this);
         copy.setOrientation(LinearLayout.VERTICAL);
-        copy.addView(text("图鉴", 28, INK, true));
+        copy.addView(text("我的豆", 28, INK, true));
         TextView sub = text("按产区、处理法和风味沉淀口味地图", 13, MUTED, false);
         sub.setPadding(0, dp(2), 0, 0);
         copy.addView(sub);
@@ -267,14 +276,131 @@ public class MainActivity extends Activity {
         top.addView(add, new LinearLayout.LayoutParams(dp(48), dp(48)));
         hero.addView(top);
 
-        LinearLayout legend = new LinearLayout(this);
-        legend.setOrientation(LinearLayout.HORIZONTAL);
-        legend.setPadding(0, dp(14), 0, 0);
-        legend.addView(legendDot("甜感", Color.rgb(199, 154, 59)));
-        legend.addView(legendDot("果香", Color.rgb(207, 94, 115)));
-        legend.addView(legendDot("坚果巧克力", Color.rgb(105, 77, 48)));
-        hero.addView(legend);
         return hero;
+    }
+
+    private void addBeanCards(List<Bean> beans) {
+        if (beans.isEmpty()) {
+            TextView empty = text("没有符合筛选条件的豆子", 13, MUTED, true);
+            empty.setPadding(0, dp(8), 0, dp(8));
+            content.addView(empty);
+            return;
+        }
+        if (!beanGalleryMode) {
+            for (Bean bean : beans) content.addView(beanCard(bean), fullMargin());
+            return;
+        }
+        GridLayout grid = new GridLayout(this);
+        grid.setColumnCount(2);
+        int cell = (getResources().getDisplayMetrics().widthPixels - dp(40)) / 2;
+        for (int i = 0; i < beans.size(); i++) {
+            Bean bean = beans.get(i);
+            GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
+            lp.width = cell;
+            lp.setMargins(i % 2 == 0 ? 0 : dp(8), dp(4), 0, dp(4));
+            grid.addView(beanGalleryCard(bean), lp);
+        }
+        content.addView(grid, fullMargin());
+    }
+
+    private View beanBrowseControls() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(12), dp(10), dp(12), dp(10));
+        box.setBackground(round(PANEL, dp(16), LINE));
+        LinearLayout top = new LinearLayout(this);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.addView(text("快速筛选", 14, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
+        TextView list = iconButton("☷", GREEN_DARK, CREAM, LINE);
+        list.setContentDescription("列表视图");
+        TextView gallery = iconButton("▦", GREEN_DARK, CREAM, LINE);
+        gallery.setContentDescription("画廊视图");
+        list.setOnClickListener(v -> { beanGalleryMode = false; render(); });
+        gallery.setOnClickListener(v -> { beanGalleryMode = true; render(); });
+        if (!beanGalleryMode) list.setBackground(round(GREEN_SOFT, dp(12), GREEN));
+        else gallery.setBackground(round(GREEN_SOFT, dp(12), GREEN));
+        top.addView(list, new LinearLayout.LayoutParams(dp(38), dp(34)));
+        LinearLayout.LayoutParams galleryLp = new LinearLayout.LayoutParams(dp(38), dp(34));
+        galleryLp.setMargins(dp(6), 0, 0, 0);
+        top.addView(gallery, galleryLp);
+        box.addView(top);
+        LinearLayout filters = new LinearLayout(this);
+        filters.setOrientation(LinearLayout.HORIZONTAL);
+        filters.setPadding(0, dp(8), 0, 0);
+        addFilterButton(filters, "豆种", beanTypeFilter, 0);
+        addFilterButton(filters, "烘焙", roastFilter, 1);
+        addFilterButton(filters, "处理", processFilter, 2);
+        addFilterButton(filters, "品牌", roasterFilter, 3);
+        box.addView(filters);
+        return box;
+    }
+
+    private void addFilterButton(LinearLayout row, String label, String value, int which) {
+        Button button = subtleButton(label + ("全部".equals(value) ? " ⌄" : " ●"));
+        button.setTextSize(11);
+        button.setOnClickListener(v -> showBeanFilterDialog(label, which));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(38), 1);
+        lp.setMargins(row.getChildCount() == 0 ? 0 : dp(5), 0, 0, 0);
+        row.addView(button, lp);
+    }
+
+    private void showBeanFilterDialog(String label, int which) {
+        List<String> options = new ArrayList<>();
+        options.add("全部");
+        for (Bean bean : db.beanGroups()) {
+            String value = which == 0 ? bean.beanType : which == 1 ? bean.roastLevel : which == 2 ? bean.process : bean.roaster;
+            if (value != null && !value.trim().isEmpty() && !options.contains(value)) options.add(value);
+        }
+        new AlertDialog.Builder(this).setTitle("筛选" + label)
+                .setItems(options.toArray(new String[0]), (d, position) -> {
+                    String selected = options.get(position);
+                    if (which == 0) beanTypeFilter = selected;
+                    else if (which == 1) roastFilter = selected;
+                    else if (which == 2) processFilter = selected;
+                    else roasterFilter = selected;
+                    render();
+                }).show();
+    }
+
+    private boolean matchesBeanFilter(Bean bean) {
+        return ("全部".equals(beanTypeFilter) || beanTypeFilter.equals(bean.beanType))
+                && ("全部".equals(roastFilter) || roastFilter.equals(bean.roastLevel))
+                && ("全部".equals(processFilter) || processFilter.equals(bean.process))
+                && ("全部".equals(roasterFilter) || roasterFilter.equals(bean.roaster));
+    }
+
+    private LinearLayout.LayoutParams badgeMargin() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+        lp.setMargins(dp(6), 0, 0, 0);
+        return lp;
+    }
+
+    private View beanGalleryCard(Bean bean) {
+        LinearLayout card = card();
+        card.setPadding(dp(10), dp(10), dp(10), dp(10));
+        card.addView(beanThumb(bean, dp(146), dp(14)), new LinearLayout.LayoutParams(-1, dp(146)));
+        TextView name = text(bean.name, 15, INK, true);
+        name.setPadding(0, dp(9), 0, 0);
+        name.setMaxLines(2);
+        card.addView(name);
+        TextView meta = text(bean.roaster + " · " + bean.beanType, 11, MUTED, false);
+        meta.setPadding(0, dp(3), 0, 0);
+        meta.setMaxLines(2);
+        card.addView(meta);
+        LinearLayout foot = new LinearLayout(this);
+        foot.setGravity(Gravity.CENTER_VERTICAL);
+        TextView roast = statusBadge(bean.roastLevel, AMBER_SOFT, AMBER);
+        foot.addView(roast);
+        TextView process = statusBadge(bean.process, GREEN_SOFT, GREEN_DARK);
+        LinearLayout.LayoutParams processLp = new LinearLayout.LayoutParams(0, -2, 1);
+        processLp.setMargins(dp(5), 0, 0, 0);
+        foot.addView(process, processLp);
+        foot.addView(stockRing(bean), new LinearLayout.LayoutParams(dp(36), dp(36)));
+        LinearLayout.LayoutParams footLp = new LinearLayout.LayoutParams(-1, dp(44));
+        footLp.setMargins(0, dp(5), 0, 0);
+        card.addView(foot, footLp);
+        card.setOnClickListener(v -> showEditBeanDialog(bean));
+        return card;
     }
 
     private void addConsumedBeanSection(List<Bean> beans) {
@@ -285,7 +411,7 @@ public class MainActivity extends Activity {
         TextView amount = text(beans.size() + " 款", 12, MUTED, false);
         amount.setPadding(0, 0, 0, dp(4));
         content.addView(amount);
-        for (Bean bean : beans) content.addView(beanCard(bean), fullMargin());
+        addBeanCards(beans);
     }
 
     private View beanCard(Bean bean) {
@@ -404,7 +530,7 @@ public class MainActivity extends Activity {
         Bean pick = brewBeanId > 0 ? db.beanById(brewBeanId) : null;
         if (pick == null || pick.remainingGram <= 0) pick = db.recommendedBean();
         if (pick == null) {
-            pageTitle("记录一杯", "先添加一包咖啡豆，再开始记录冲煮");
+            pageTitle("喝一杯", "先添加一包咖啡豆，再开始记录冲煮");
             content.addView(emptyAlertCard(), fullMargin());
             return;
         }
@@ -443,9 +569,10 @@ public class MainActivity extends Activity {
         content.addView(ratingSection(inputs), fullMargin());
 
         EditText note = input("还有什么想记的", "");
+        ImageUploadField brewImages = imageUploadField("");
         content.addView(formSection("风味笔记",
                 chipGroup("notes", new String[]{"甜感清楚", "尾段干净", "明亮酸", "醇厚", "偏苦", "偏酸"}, inputs, false),
-                labeled("补充", note)), fullMargin());
+                labeled("补充", note), labeled("冲煮图片", brewImages.box)), fullMargin());
 
         TextView consume = text("", 13, MUTED, true);
         consume.setGravity(Gravity.CENTER);
@@ -461,7 +588,7 @@ public class MainActivity extends Activity {
         save.setOnClickListener(v -> {
             String finalNote = brewNote(inputs.noteTags, note.getText().toString());
             db.addBrew(currentPick.id, LocalDate.now().toString(), brewTime.getText().toString(), inputs.method, num(dose, 15), num(water, 240),
-                    inputs.grind, (int) num(temp, 92), time.getText().toString(), inputs.score / 10.0, finalNote);
+                    inputs.grind, (int) num(temp, 92), time.getText().toString(), inputs.score / 10.0, finalNote, joinImages(brewImages.images));
             Toast.makeText(this, "已记录并扣减库存", Toast.LENGTH_SHORT).show();
             render();
         });
@@ -479,7 +606,7 @@ public class MainActivity extends Activity {
     }
 
     private void renderStock() {
-        pageTitle("库存", "优先处理开封久、赏味尾段和余量较低的豆子");
+        pageTitle("剩多少", "优先处理开封久、赏味尾段和余量较低的豆子");
         List<Bean> beans = db.beanGroupsByPriority();
         List<Bean> active = new ArrayList<>();
         List<Bean> finished = new ArrayList<>();
@@ -489,12 +616,49 @@ public class MainActivity extends Activity {
         }
         content.addView(stockOverview(active, finished), fullMargin());
         content.addView(stockConsumptionCard(), fullMargin());
+        sectionTitle("未来 30 天", "养豆完成、接近赏味期与赏味截止提醒");
+        content.addView(futureBeanTimeline(beans), fullMargin());
 
         addStockSection("优先处理", active, "priority");
         addStockSection("正在享用", active, "ready");
         addStockSection("养豆中", active, "resting");
         addStockSection("已过峰值", active, "past");
         addStockSection("已消耗完", finished, "consumed");
+    }
+
+    private View futureBeanTimeline(List<Bean> beans) {
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        LocalDate today = LocalDate.now();
+        List<FutureBeanEvent> events = new ArrayList<>();
+        for (Bean bean : beans) {
+            LocalDate ready = date(bean.roastDate).plusDays(7);
+            long readyDays = ChronoUnit.DAYS.between(today, ready);
+            if (readyDays >= -7 && readyDays <= 30) {
+                String detail = readyDays < 0 ? "已养好 " + (-readyDays) + " 天" : readyDays == 0 ? "今天养豆完成" : "还有 " + readyDays + " 天养好豆";
+                events.add(new FutureBeanEvent(ready, bean.name + " 养豆完成", detail, bean.roaster + " · " + bean.process, "养", GREEN_SOFT, GREEN_DARK));
+            }
+            if (isConsumed(bean)) {
+                LocalDate emptyDate = db.lastBrewDate(bean.batchIds());
+                long emptyDays = ChronoUnit.DAYS.between(today, emptyDate);
+                if (emptyDays >= -7 && emptyDays <= 0) {
+                    events.add(new FutureBeanEvent(emptyDate, bean.name + " 已喝完", "已消耗完，不再提示赏味期", bean.roaster + " · " + bean.process, "空", CREAM, MUTED));
+                }
+                continue;
+            }
+            LocalDate best = date(cleanBestBefore(bean));
+            long days = ChronoUnit.DAYS.between(today, best);
+            if (days < -7 || days > 30) continue;
+            String detail = days < 0 ? "已过赏味期 " + (-days) + " 天" : days == 0 ? "今天到达赏味节点" : "还有 " + days + " 天 · " + drinkingWindow(bean);
+            events.add(new FutureBeanEvent(best, bean.name + " 赏味节点", detail, bean.roaster + " · " + bean.process, "赏", AMBER_SOFT, AMBER));
+        }
+        Collections.sort(events, (a, b) -> a.date.compareTo(b.date));
+        for (int i = 0; i < events.size(); i++) {
+            FutureBeanEvent event = events.get(i);
+            list.addView(timelineRow(event.date.toString(), event.title, event.detail, event.note, event.marker, event.fill, event.ink, i == events.size() - 1));
+        }
+        if (list.getChildCount() == 0) list.addView(text("过去 7 天到未来 30 天没有需要特别留意的节点", 13, MUTED, true));
+        return list;
     }
 
     private View stockOverview(List<Bean> beans, List<Bean> finished) {
@@ -604,7 +768,7 @@ public class MainActivity extends Activity {
     }
 
     private View beanThumb(Bean bean, int size, int radius) {
-        List<String> images = imageList(bean.imageUris);
+        List<String> images = displayImages(bean);
         if (!images.isEmpty()) {
             ImageView photo = new ImageView(this);
             photo.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -620,7 +784,15 @@ public class MainActivity extends Activity {
     }
 
     private View imageGallery(Bean bean) {
-        List<String> images = imageList(bean.imageUris);
+        List<String> images = allBeanImages(bean);
+        return imageGallery(images);
+    }
+
+    private View imageGallery(String imageUris) {
+        return imageGallery(imageList(imageUris));
+    }
+
+    private View imageGallery(List<String> images) {
         if (images.isEmpty()) return null;
         GridLayout gallery = new GridLayout(this);
         int count = images.size();
@@ -639,6 +811,22 @@ public class MainActivity extends Activity {
         return gallery;
     }
 
+    private List<String> displayImages(Bean bean) {
+        List<String> beanImages = imageList(bean.beanImageUris);
+        if (!beanImages.isEmpty()) return beanImages;
+        List<String> packageImages = imageList(bean.packageImageUris);
+        if (!packageImages.isEmpty()) return packageImages;
+        return imageList(bean.imageUris);
+    }
+
+    private List<String> allBeanImages(Bean bean) {
+        List<String> out = new ArrayList<>();
+        for (String uri : imageList(bean.beanImageUris)) if (!out.contains(uri) && out.size() < 3) out.add(uri);
+        for (String uri : imageList(bean.packageImageUris)) if (!out.contains(uri) && out.size() < 3) out.add(uri);
+        for (String uri : imageList(bean.imageUris)) if (!out.contains(uri) && out.size() < 3) out.add(uri);
+        return out;
+    }
+
     private View imageTile(String imageUri, int targetSize, int radius) {
         FrameLayout tile = new FrameLayout(this);
         tile.setPadding(dp(1), dp(1), dp(1), dp(1));
@@ -648,22 +836,42 @@ public class MainActivity extends Activity {
         ImageView image = new ImageView(this);
         image.setScaleType(ImageView.ScaleType.CENTER_CROP);
         setCachedImage(image, imageUri, targetSize);
+        tile.setOnClickListener(v -> showImagePreview(imageUri));
         tile.addView(image, new FrameLayout.LayoutParams(-1, -1));
         return tile;
     }
 
+    private void showImagePreview(String imageUri) {
+        ImageView image = new ImageView(this);
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        image.setAdjustViewBounds(true);
+        setCachedImage(image, imageUri, getResources().getDisplayMetrics().widthPixels);
+        new AlertDialog.Builder(this).setView(image).setPositiveButton("关闭", null).show();
+    }
+
     private void setCachedImage(ImageView image, String imageUri, int targetSize) {
         String key = imageUri + "@" + Math.max(targetSize, dp(48));
+        image.setTag(key);
         Bitmap cached = imageCache.get(key);
         if (cached != null) {
             image.setImageBitmap(cached);
             return;
         }
-        Bitmap bitmap = decodeBitmap(imageUri, Math.max(targetSize, dp(48)));
-        if (bitmap != null) {
+        image.setImageDrawable(null);
+        imageExecutor.execute(() -> {
+            Bitmap bitmap = decodeBitmap(imageUri, Math.max(targetSize, dp(48)));
+            if (bitmap == null) return;
             imageCache.put(key, bitmap);
-            image.setImageBitmap(bitmap);
-        }
+            image.post(() -> {
+                if (key.equals(image.getTag())) image.setImageBitmap(bitmap);
+            });
+        });
+    }
+
+    @Override
+    protected void onDestroy() {
+        imageExecutor.shutdownNow();
+        super.onDestroy();
     }
 
     private Bitmap decodeBitmap(String imageUri, int targetSize) {
@@ -708,11 +916,14 @@ public class MainActivity extends Activity {
         grid.addView(statCard("平均评分", s.avgScore > 0 ? String.format(Locale.CHINA, "%.1f", s.avgScore) : "-"));
         content.addView(grid, fullMargin());
 
-        content.addView(barChartCard("近 7 天消耗", "每天消耗的粉量", db.dailyConsumption(7), "g"), fullMargin());
-        content.addView(barChartCard("冲煮方式", "不同器具的使用频次", db.methodCounts(), "杯"), fullMargin());
-        content.addView(barChartCard("烘焙度分布", "按当前豆子库存批次统计", db.roastLevelCounts(), "款"), fullMargin());
-        content.addView(barChartCard("豆种分布", "按当前豆子库存批次统计", db.beanTypeCounts(), "款"), fullMargin());
-        content.addView(timeColumnChartCard(db.hourCounts()), fullMargin());
+        content.addView(columnChartCard("近 7 天消耗", "横轴为日期，纵轴为消耗粉量", db.dailyConsumption(7), "g"), fullMargin());
+        content.addView(columnChartCard("冲煮时段", "横轴为时间段，纵轴为冲煮杯数", db.hourCounts(), "杯"), fullMargin());
+        content.addView(columnChartCard("月度购入开销", "横轴为月份，纵轴为购入开销", db.monthlyPurchaseSpend(), "元"), fullMargin());
+        content.addView(distributionChartCard("冲煮方式", "不同器具的使用频次", db.methodCounts(), "杯"), fullMargin());
+        content.addView(distributionChartCard("烘焙度分布", "按当前豆子库存批次统计", db.roastLevelCounts(), "款"), fullMargin());
+        content.addView(distributionChartCard("豆种分布", "按当前豆子库存批次统计", db.beanTypeCounts(), "款"), fullMargin());
+        content.addView(distributionChartCard("克重价分布", "按每克购入价统计", db.priceBuckets(), "款"), fullMargin());
+        content.addView(regionMapCard(db.originCounts()), fullMargin());
         content.addView(barChartCard("评分分布", "这段时间的满意度集中在哪", db.scoreBuckets(), "杯"), fullMargin());
 
         sectionTitle("复购候选", "高分且记录次数更多的豆子会排在前面");
@@ -722,7 +933,7 @@ public class MainActivity extends Activity {
     }
 
     private void renderAlerts() {
-        pageTitle("提醒", "养豆完成、最佳赏味期、低库存都会聚合在这里");
+        pageTitle("注意啦", "养豆完成、最佳赏味期、低库存都会聚合在这里");
         List<String> alerts = db.alerts();
         if (alerts.isEmpty()) {
             content.addView(emptyAlertCard(), fullMargin());
@@ -812,8 +1023,8 @@ public class MainActivity extends Activity {
                 list.addView(brewDayHeader(day, countBrewsOnDate(brews, day)));
             }
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-            lp.setMargins(0, 0, 0, dp(8));
-            list.addView(brewGroupedRow(brew, showBeanName), lp);
+            lp.setMargins(0, 0, 0, dp(5));
+            list.addView(brewGroupedTimelineRow(brew, showBeanName), lp);
         }
         return list;
     }
@@ -828,22 +1039,34 @@ public class MainActivity extends Activity {
         return header;
     }
 
-    private View brewGroupedRow(Brew brew, boolean showBeanName) {
+    private View brewGroupedTimelineRow(Brew brew, boolean showBeanName) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(12), dp(10), dp(12), dp(10));
-        row.setBackground(round(PANEL, dp(12), LINE));
+        row.setPadding(0, 0, 0, dp(3));
         row.setOnClickListener(v -> showEditBrewTimeDialog(brew));
 
         TextView time = text(cleanText(brew.brewTime, "00:00"), 15, GREEN_DARK, true);
         time.setGravity(Gravity.CENTER);
-        time.setBackground(round(GREEN_SOFT, dp(10), Color.TRANSPARENT));
-        row.addView(time, new LinearLayout.LayoutParams(dp(58), dp(42)));
+        time.setPadding(0, dp(8), dp(6), 0);
+        row.addView(time, new LinearLayout.LayoutParams(dp(62), -1));
+
+        LinearLayout axis = new LinearLayout(this);
+        axis.setOrientation(LinearLayout.VERTICAL);
+        axis.setGravity(Gravity.CENTER_HORIZONTAL);
+        TextView dot = text("●", 12, GREEN_DARK, true);
+        dot.setGravity(Gravity.CENTER);
+        dot.setBackground(round(GREEN_SOFT, dp(12), GREEN_DARK));
+        axis.addView(dot, new LinearLayout.LayoutParams(dp(27), dp(27)));
+        View line = new View(this);
+        line.setBackgroundColor(LINE);
+        axis.addView(line, new LinearLayout.LayoutParams(dp(2), 0, 1));
+        row.addView(axis, new LinearLayout.LayoutParams(dp(34), -1));
 
         LinearLayout copy = new LinearLayout(this);
         copy.setOrientation(LinearLayout.VERTICAL);
-        copy.setPadding(dp(12), 0, dp(8), 0);
+        copy.setPadding(dp(12), dp(10), dp(12), dp(10));
+        copy.setBackground(round(PANEL, dp(12), LINE));
         String title = showBeanName ? brew.beanName : brew.method + " · " + String.format(Locale.CHINA, "%.1f 分", brew.score);
         String detail = String.format(Locale.CHINA, "%s · %.0fg 粉 / %.0fg 水 · %s · %d°C · %s",
                 showBeanName ? brew.method : "冲煮",
@@ -852,7 +1075,11 @@ public class MainActivity extends Activity {
                 cleanText(brew.grind, "研磨未记录"),
                 brew.temp,
                 cleanText(brew.time, "时间未记录"));
-        copy.addView(text(title, 15, INK, true));
+        LinearLayout scoreLine = new LinearLayout(this);
+        scoreLine.setGravity(Gravity.CENTER_VERTICAL);
+        scoreLine.addView(text(title, 15, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
+        scoreLine.addView(statusBadge(String.format(Locale.CHINA, "%.1f", brew.score), GREEN_SOFT, GREEN_DARK));
+        copy.addView(scoreLine);
         TextView detailView = text(detail, 12, MUTED, false);
         detailView.setPadding(0, dp(3), 0, 0);
         copy.addView(detailView);
@@ -861,8 +1088,9 @@ public class MainActivity extends Activity {
             note.setPadding(0, dp(5), 0, 0);
             copy.addView(note);
         }
+        View photos = imageGallery(brew.imageUris);
+        if (photos != null) copy.addView(photos);
         row.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
-        row.addView(statusBadge(String.format(Locale.CHINA, "%.1f", brew.score), GREEN_SOFT, GREEN_DARK));
         return row;
     }
 
@@ -900,17 +1128,36 @@ public class MainActivity extends Activity {
         LinearLayout form = form();
         EditText date = input("冲煮日期 yyyy-MM-dd", cleanText(brew.date, LocalDate.now().toString()));
         EditText brewTime = input("冲煮时间 HH:mm", cleanText(brew.brewTime, LocalTime.now().format(BREW_TIME_FORMAT)));
+        List<Bean> choices = db.availableBatches();
+        Bean current = db.beanById(brew.beanId);
+        final Bean[] picked = {current};
+        TextView beanPick = choiceField(current == null ? brew.beanName : current.name + " · 剩余 " + fmt(current.remainingGram) + "g");
+        beanPick.setOnClickListener(v -> {
+            String[] names = new String[choices.size()];
+            for (int i = 0; i < choices.size(); i++) names[i] = choices.get(i).name + " · " + choices.get(i).roaster + " · 剩余 " + fmt(choices.get(i).remainingGram) + "g";
+            new AlertDialog.Builder(this).setTitle("选择实际使用的豆子").setItems(names, (d, which) -> {
+                picked[0] = choices.get(which);
+                beanPick.setText(names[which]);
+            }).show();
+        });
         addAll(form,
+                formSection("所用豆子", labeled("豆子", beanPick)),
                 formSection("记录时间",
                         labeled("日期", date),
                         labeled("时间", brewTime)));
 
         new AlertDialog.Builder(this)
-                .setTitle("修改冲煮时间")
+                .setTitle("修改冲煮记录")
                 .setView(scrollForm(form))
                 .setPositiveButton("保存", (d, w) -> {
+                    if (picked[0] == null) return;
+                    if (picked[0].id != brew.beanId && picked[0].remainingGram + 0.001 < brew.dose) {
+                        Toast.makeText(this, "新选择的豆子余量不足 " + fmt(brew.dose) + "g", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
                     db.updateBrewDateTime(brew.id, date.getText().toString(), brewTime.getText().toString());
-                    Toast.makeText(this, "冲煮时间已更新", Toast.LENGTH_SHORT).show();
+                    db.moveBrewToBean(brew.id, brew.beanId, picked[0].id, brew.dose);
+                    Toast.makeText(this, "冲煮记录与库存已更新", Toast.LENGTH_SHORT).show();
                     render();
                 })
                 .setNegativeButton("取消", null)
@@ -1318,6 +1565,48 @@ public class MainActivity extends Activity {
         return box;
     }
 
+    private View distributionChartCard(String title, String sub, List<ChartItem> items, String unit) {
+        return items.size() <= 4 ? pieChartCard(title, sub, items, unit) : barChartCard(title, sub, items, unit);
+    }
+
+    private View pieChartCard(String title, String sub, List<ChartItem> items, String unit) {
+        LinearLayout box = card();
+        box.setPadding(dp(14), dp(14), dp(14), dp(14));
+        box.addView(text(title, 17, INK, true));
+        TextView subtitle = text(sub, 12, MUTED, false);
+        subtitle.setPadding(0, dp(2), 0, dp(8));
+        box.addView(subtitle);
+        double total = 0;
+        for (ChartItem item : items) total += item.value;
+        if (items.isEmpty() || total <= 0) {
+            box.addView(text("暂无足够数据", 13, MUTED, true));
+            return box;
+        }
+        LinearLayout body = new LinearLayout(this);
+        body.setGravity(Gravity.CENTER_VERTICAL);
+        body.addView(new PieChartView(this, items), new LinearLayout.LayoutParams(dp(150), dp(150)));
+        LinearLayout legend = new LinearLayout(this);
+        legend.setOrientation(LinearLayout.VERTICAL);
+        legend.setGravity(Gravity.CENTER_VERTICAL);
+        legend.setPadding(dp(10), 0, 0, 0);
+        int[] colors = pieColors();
+        for (int i = 0; i < items.size(); i++) {
+            ChartItem item = items.get(i);
+            TextView entry = text("●  " + item.label + "  " + formatChartValue(item.value) + unit, 12, colors[i % colors.length], true);
+            entry.setMaxLines(2);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+            lp.setMargins(0, i == 0 ? 0 : dp(8), 0, 0);
+            legend.addView(entry, lp);
+        }
+        body.addView(legend, new LinearLayout.LayoutParams(0, -2, 1));
+        box.addView(body);
+        return box;
+    }
+
+    private int[] pieColors() {
+        return new int[]{GREEN, AMBER, ROSE, Color.rgb(128, 164, 223)};
+    }
+
     private View barChartRow(String label, double value, double max, String unit) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -1325,7 +1614,8 @@ public class MainActivity extends Activity {
         row.setPadding(0, dp(5), 0, dp(5));
 
         TextView labelView = text(label, 12, MUTED, true);
-        row.addView(labelView, new LinearLayout.LayoutParams(dp(64), -2));
+        labelView.setMaxLines(4);
+        row.addView(labelView, new LinearLayout.LayoutParams(dp(138), -2));
 
         LinearLayout track = new LinearLayout(this);
         track.setOrientation(LinearLayout.HORIZONTAL);
@@ -1333,7 +1623,7 @@ public class MainActivity extends Activity {
         track.setBackground(round(CREAM, dp(10), Color.TRANSPARENT));
         View fill = new View(this);
         fill.setBackground(round(GREEN_SOFT, dp(10), Color.TRANSPARENT));
-        int fillWidth = Math.max(dp(12), (int) ((getResources().getDisplayMetrics().widthPixels - dp(178)) * (value / max)));
+        int fillWidth = Math.max(dp(12), (int) ((getResources().getDisplayMetrics().widthPixels - dp(252)) * (value / max)));
         track.addView(fill, new LinearLayout.LayoutParams(fillWidth, dp(12)));
         row.addView(track, new LinearLayout.LayoutParams(0, dp(14), 1));
 
@@ -1343,11 +1633,11 @@ public class MainActivity extends Activity {
         return row;
     }
 
-    private View timeColumnChartCard(List<ChartItem> items) {
+    private View columnChartCard(String title, String subtitleText, List<ChartItem> items, String unit) {
         LinearLayout box = card();
         box.setPadding(dp(14), dp(14), dp(14), dp(14));
-        box.addView(text("冲煮时段", 17, INK, true));
-        TextView subtitle = text("横坐标为时间段，纵坐标为冲煮杯数", 12, MUTED, false);
+        box.addView(text(title, 17, INK, true));
+        TextView subtitle = text(subtitleText, 12, MUTED, false);
         subtitle.setPadding(0, dp(2), 0, dp(10));
         box.addView(subtitle);
         double max = 0;
@@ -1380,6 +1670,43 @@ public class MainActivity extends Activity {
         for (ChartItem item : items) columns.addView(timeColumn(item, max), new LinearLayout.LayoutParams(0, -2, 1));
         chart.addView(columns, new LinearLayout.LayoutParams(0, -2, 1));
         box.addView(chart);
+        return box;
+    }
+
+    private View regionMapCard(List<ChartItem> items) {
+        LinearLayout box = card();
+        box.setPadding(dp(14), dp(14), dp(14), dp(14));
+        box.addView(text("产区分布", 17, INK, true));
+        TextView subtitle = text("地图上的圆点代表当前库存豆子的主要产区，圆点越大数量越多", 12, MUTED, false);
+        subtitle.setPadding(0, dp(2), 0, dp(10));
+        box.addView(subtitle);
+        if (items.isEmpty()) {
+            box.addView(text("暂无产区数据", 13, MUTED, true));
+            return box;
+        }
+        FrameLayout mapBox = new FrameLayout(this);
+        mapBox.setBackground(round(Color.argb(34, 255, 255, 255), dp(14), Color.TRANSPARENT));
+        ImageView mapBase = new ImageView(this);
+        mapBase.setImageResource(getResources().getIdentifier("world_map_base", "drawable", getPackageName()));
+        mapBase.setScaleType(ImageView.ScaleType.FIT_XY);
+        mapBase.setAlpha(0.52f);
+        mapBase.setColorFilter(Color.rgb(238, 230, 212));
+        mapBox.addView(mapBase, new FrameLayout.LayoutParams(-1, -1));
+        mapBox.addView(new WorldMapView(this, items), new FrameLayout.LayoutParams(-1, -1));
+        box.addView(mapBox, new LinearLayout.LayoutParams(-1, dp(198)));
+        GridLayout legend = new GridLayout(this);
+        legend.setColumnCount(2);
+        legend.setPadding(0, dp(10), 0, 0);
+        for (int i = 0; i < items.size(); i++) {
+            ChartItem item = items.get(i);
+            TextView entry = text("●  " + item.label + "  " + formatChartValue(item.value) + "款", 11, i % 2 == 0 ? GREEN_DARK : AMBER, true);
+            entry.setMaxLines(2);
+            GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
+            lp.width = (getResources().getDisplayMetrics().widthPixels - dp(76)) / 2;
+            lp.setMargins(i % 2 == 0 ? 0 : dp(8), dp(3), 0, dp(3));
+            legend.addView(entry, lp);
+        }
+        box.addView(legend);
         return box;
     }
 
@@ -1592,6 +1919,7 @@ public class MainActivity extends Activity {
                 image.setScaleType(ImageView.ScaleType.CENTER_CROP);
                 setCachedImage(image, images.get(i), dp(72));
                 tile.addView(image, new FrameLayout.LayoutParams(-1, -1));
+                image.setOnClickListener(v -> showImagePreview(images.get(index)));
                 TextView remove = text("×", 15, Color.WHITE, true);
                 remove.setGravity(Gravity.CENTER);
                 remove.setBackground(round(Color.argb(205, 178, 73, 83), dp(12), Color.TRANSPARENT));
@@ -1629,7 +1957,8 @@ public class MainActivity extends Activity {
         EditText process = input("处理法", editing ? bean.process : "日晒");
         EditText roast = input("烘焙度", editing ? bean.roastLevel : "浅烘");
         EditText tags = input("风味标签", editing ? bean.flavorTags : "莓果,花香,柑橘");
-        ImageUploadField images = imageUploadField(editing ? bean.imageUris : "");
+        ImageUploadField packageImages = imageUploadField(editing ? bean.packageImageUris : "");
+        ImageUploadField beanImages = imageUploadField(editing ? bean.beanImageUris : "");
         EditText total = numberInput("规格克数", editing ? fmt(bean.totalGram) : "200");
         EditText remaining = numberInput("剩余克数", editing ? fmt(bean.remainingGram) : "200");
         EditText price = numberInput("购买价", editing ? fmt(bean.price) : "88");
@@ -1649,7 +1978,8 @@ public class MainActivity extends Activity {
                         labeled("烘焙度", roast),
                         labeled("风味标签", tags)),
                 formSection("豆子图片",
-                        labeled("图片", images.box)),
+                        labeled("包装图片", packageImages.box),
+                        labeled("豆子外观", beanImages.box)),
                 formSection("规格与库存",
                         labeled("规格克数", total),
                         labeled("剩余克数", remaining),
@@ -1674,7 +2004,9 @@ public class MainActivity extends Activity {
                     updated.process = process.getText().toString();
                     updated.roastLevel = roast.getText().toString();
                     updated.flavorTags = tags.getText().toString();
-                    updated.imageUris = joinImages(images.images);
+                    updated.packageImageUris = joinImages(packageImages.images);
+                    updated.beanImageUris = joinImages(beanImages.images);
+                    updated.imageUris = updated.packageImageUris;
                     updated.totalGram = num(total, 200);
                     updated.remainingGram = num(remaining, updated.totalGram);
                     updated.price = num(price, 0);
@@ -1706,7 +2038,8 @@ public class MainActivity extends Activity {
         EditText process = input("处理法", bean.process);
         EditText roast = input("烘焙度", bean.roastLevel);
         EditText tags = input("风味标签", bean.flavorTags);
-        ImageUploadField images = imageUploadField(bean.imageUris);
+        ImageUploadField packageImages = imageUploadField(bean.packageImageUris);
+        ImageUploadField beanImages = imageUploadField(bean.beanImageUris);
         addAll(form,
                 formSection("基本信息",
                         labeled("豆子名称", name),
@@ -1718,7 +2051,8 @@ public class MainActivity extends Activity {
                         labeled("烘焙度", roast),
                         labeled("风味标签", tags)),
                 formSection("豆子图片",
-                        labeled("图片", images.box)));
+                        labeled("包装图片", packageImages.box),
+                        labeled("豆子外观", beanImages.box)));
 
         List<Bean> batches = bean.batchesOrSelf();
         List<EditText> totals = new ArrayList<>();
@@ -1748,7 +2082,9 @@ public class MainActivity extends Activity {
                         updated.process = process.getText().toString();
                         updated.roastLevel = roast.getText().toString();
                         updated.flavorTags = tags.getText().toString();
-                        updated.imageUris = joinImages(images.images);
+                        updated.packageImageUris = joinImages(packageImages.images);
+                        updated.beanImageUris = joinImages(beanImages.images);
+                        updated.imageUris = updated.packageImageUris;
                         updated.totalGram = num(totals.get(i), updated.totalGram);
                         updated.remainingGram = num(remainings.get(i), updated.remainingGram);
                         updated.price = num(prices.get(i), updated.price);
@@ -1910,6 +2246,7 @@ public class MainActivity extends Activity {
 
     private void showTimeline(Bean bean) {
         LinearLayout box = form();
+        box.setPadding(dp(12), dp(4), dp(12), dp(4));
         box.addView(text(bean.name, 22, INK, true));
         box.addView(text(bean.roaster + " · " + bean.beanType + " · " + bean.origin + " · " + bean.process, 14, MUTED, false));
         box.addView(tagRow(bean.flavorTags));
@@ -1926,7 +2263,6 @@ public class MainActivity extends Activity {
         box.addView(brewTimelineList(brews, false));
 
         new AlertDialog.Builder(this)
-                .setTitle("豆子时间线")
                 .setView(scrollForm(box))
                 .setPositiveButton("好", null)
                 .show();
@@ -2019,8 +2355,8 @@ public class MainActivity extends Activity {
     }
 
     private View stockRing(Bean bean) {
-        double consumed = bean.totalGram <= 0 ? 0 : Math.max(0, Math.min(1, (bean.totalGram - bean.remainingGram) / bean.totalGram));
-        return new RingView(this, consumed, GREEN, CREAM, INK, String.format(Locale.CHINA, "%.0f%%", consumed * 100));
+        double remaining = bean.totalGram <= 0 ? 0 : Math.max(0, Math.min(1, bean.remainingGram / bean.totalGram));
+        return new RingView(this, remaining, GREEN, CREAM, INK, String.format(Locale.CHINA, "%.0f%%", remaining * 100));
     }
 
     private LinearLayout batchList(Bean bean) {
@@ -2066,11 +2402,7 @@ public class MainActivity extends Activity {
 
     private String shortBeanType(String raw) {
         String value = normalizeBeanTypes(raw);
-        int slash = value.indexOf("/");
-        if (slash > 0) return value.substring(0, slash).trim();
-        int split = value.indexOf("、");
-        if (split > 0) return value.substring(0, split).trim();
-        return value;
+        return value.replaceAll("\\s*/\\s*[A-Za-z][A-Za-z .'-]*", "").trim();
     }
 
     private String drinkHint(Bean bean) {
@@ -2543,6 +2875,92 @@ public class MainActivity extends Activity {
         }
     }
 
+    class WorldMapView extends View {
+        private final List<ChartItem> items;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        WorldMapView(Context context, List<ChartItem> items) {
+            super(context);
+            this.items = items;
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float w = getWidth();
+            float h = getHeight();
+            paint.setStyle(Paint.Style.FILL);
+            double max = 1;
+            for (ChartItem item : items) max = Math.max(max, item.value);
+            for (ChartItem item : items) {
+                float[] point = mapPoint(item.label);
+                float x = w * point[0];
+                float y = h * point[1];
+                float r = dp(6) + (float) (dp(10) * item.value / max);
+                paint.setColor(Color.argb(90, 34, 157, 139));
+                canvas.drawCircle(x, y, r + dp(4), paint);
+                paint.setColor(GREEN);
+                canvas.drawCircle(x, y, r, paint);
+                paint.setColor(Color.WHITE);
+                canvas.drawCircle(x, y, dp(3), paint);
+            }
+        }
+
+        private float[] mapPoint(String origin) {
+            String v = origin == null ? "" : origin.toLowerCase(Locale.ROOT);
+            if (v.contains("巴西") || v.contains("brazil")) return new float[]{.33f, .64f};
+            if (v.contains("哥伦比亚") || v.contains("colombia")) return new float[]{.28f, .53f};
+            if (v.contains("巴拿马") || v.contains("panama")) return new float[]{.25f, .50f};
+            if (v.contains("危地马拉") || v.contains("guatemala")) return new float[]{.23f, .45f};
+            if (v.contains("哥斯达黎加") || v.contains("costa rica")) return new float[]{.25f, .48f};
+            if (v.contains("埃塞") || v.contains("ethiopia")) return new float[]{.56f, .56f};
+            if (v.contains("肯尼亚") || v.contains("kenya")) return new float[]{.59f, .60f};
+            if (v.contains("卢旺达") || v.contains("rwanda")) return new float[]{.55f, .62f};
+            if (v.contains("印尼") || v.contains("印度尼西亚") || v.contains("indonesia")) return new float[]{.79f, .63f};
+            if (v.contains("也门") || v.contains("yemen")) return new float[]{.62f, .50f};
+            if (v.contains("中国") || v.contains("china")) return new float[]{.74f, .43f};
+            return new float[]{.52f, .50f};
+        }
+    }
+
+    class PieChartView extends View {
+        private final List<ChartItem> items;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        PieChartView(Context context, List<ChartItem> items) {
+            super(context);
+            this.items = items;
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            double total = 0;
+            for (ChartItem item : items) total += item.value;
+            if (total <= 0) return;
+            int size = Math.min(getWidth(), getHeight());
+            float inset = dp(8);
+            RectF oval = new RectF(inset, inset, size - inset, size - inset);
+            float start = -90;
+            int[] colors = pieColors();
+            paint.setStyle(Paint.Style.FILL);
+            for (int i = 0; i < items.size(); i++) {
+                float sweep = (float) (items.get(i).value / total * 360);
+                paint.setColor(colors[i % colors.length]);
+                canvas.drawArc(oval, start, sweep, true, paint);
+                start += sweep;
+            }
+            paint.setColor(Color.argb(190, 49, 39, 33));
+            canvas.drawCircle(size / 2f, size / 2f, size * .22f, paint);
+            paint.setTextAlign(Paint.Align.CENTER);
+            paint.setTypeface(Typeface.DEFAULT_BOLD);
+            paint.setTextSize(dp(12));
+            paint.setColor(INK);
+            Paint.FontMetrics fm = paint.getFontMetrics();
+            canvas.drawText(formatChartValue(total) + "项", size / 2f, size / 2f - (fm.ascent + fm.descent) / 2f, paint);
+        }
+    }
+
     static class Bean {
         long id;
         String name;
@@ -2553,6 +2971,8 @@ public class MainActivity extends Activity {
         String roastLevel;
         String flavorTags;
         String imageUris;
+        String packageImageUris;
+        String beanImageUris;
         double totalGram;
         double remainingGram;
         double price;
@@ -2573,6 +2993,8 @@ public class MainActivity extends Activity {
             b.roastLevel = roastLevel;
             b.flavorTags = flavorTags;
             b.imageUris = imageUris;
+            b.packageImageUris = packageImageUris;
+            b.beanImageUris = beanImageUris;
             b.totalGram = totalGram;
             b.remainingGram = remainingGram;
             b.price = price;
@@ -2641,6 +3063,7 @@ public class MainActivity extends Activity {
         String time;
         double score;
         String note;
+        String imageUris;
 
         String dateLabel() {
             return isBlank(brewTime) ? date : date + " " + brewTime;
@@ -2669,6 +3092,16 @@ public class MainActivity extends Activity {
         }
     }
 
+    static class FutureBeanEvent {
+        LocalDate date;
+        String title, detail, note, marker;
+        int fill, ink;
+        FutureBeanEvent(LocalDate date, String title, String detail, String note, String marker, int fill, int ink) {
+            this.date = date; this.title = title; this.detail = detail; this.note = note;
+            this.marker = marker; this.fill = fill; this.ink = ink;
+        }
+    }
+
     static class BrewInputs {
         String method;
         String grind;
@@ -2678,13 +3111,13 @@ public class MainActivity extends Activity {
 
     static class CoffeeDb extends SQLiteOpenHelper {
         CoffeeDb(Context context) {
-            super(context, "coffee_cellar.db", null, 6);
+            super(context, "coffee_cellar.db", null, 8);
         }
 
         @Override
         public void onCreate(SQLiteDatabase db) {
-            db.execSQL("CREATE TABLE beans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,roaster TEXT,bean_type TEXT,origin TEXT,process TEXT,roast_level TEXT,flavor_tags TEXT,image_uris TEXT,total_gram REAL,remaining_gram REAL,price REAL,purchase_date TEXT,roast_date TEXT,open_date TEXT,best_before_date TEXT)");
-            db.execSQL("CREATE TABLE brews(id INTEGER PRIMARY KEY AUTOINCREMENT,bean_id INTEGER,date TEXT,brew_time TEXT,method TEXT,dose REAL,water REAL,grind TEXT,temp INTEGER,time TEXT,score REAL,note TEXT)");
+            db.execSQL("CREATE TABLE beans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,roaster TEXT,bean_type TEXT,origin TEXT,process TEXT,roast_level TEXT,flavor_tags TEXT,image_uris TEXT,package_image_uris TEXT,bean_image_uris TEXT,total_gram REAL,remaining_gram REAL,price REAL,purchase_date TEXT,roast_date TEXT,open_date TEXT,best_before_date TEXT)");
+            db.execSQL("CREATE TABLE brews(id INTEGER PRIMARY KEY AUTOINCREMENT,bean_id INTEGER,date TEXT,brew_time TEXT,method TEXT,dose REAL,water REAL,grind TEXT,temp INTEGER,time TEXT,score REAL,note TEXT,image_uris TEXT)");
         }
 
         @Override
@@ -2706,6 +3139,12 @@ public class MainActivity extends Activity {
                 db.execSQL("ALTER TABLE brews ADD COLUMN brew_time TEXT");
                 db.execSQL("UPDATE brews SET brew_time = '00:00' WHERE brew_time IS NULL OR brew_time = ''");
             }
+            if (oldVersion < 7) {
+                db.execSQL("ALTER TABLE beans ADD COLUMN package_image_uris TEXT");
+                db.execSQL("ALTER TABLE beans ADD COLUMN bean_image_uris TEXT");
+                db.execSQL("UPDATE beans SET package_image_uris = image_uris WHERE package_image_uris IS NULL OR package_image_uris = ''");
+            }
+            if (oldVersion < 8) db.execSQL("ALTER TABLE brews ADD COLUMN image_uris TEXT");
         }
 
         void seedIfEmpty() {
@@ -2765,6 +3204,8 @@ public class MainActivity extends Activity {
             v.put("roast_level", clean(bean.roastLevel, "未知烘焙"));
             v.put("flavor_tags", clean(bean.flavorTags, "风味待补充"));
             v.put("image_uris", cleanOptional(bean.imageUris));
+            v.put("package_image_uris", cleanOptional(bean.packageImageUris));
+            v.put("bean_image_uris", cleanOptional(bean.beanImageUris));
             for (long id : bean.batchIds()) {
                 db.update("beans", v, "id = ?", new String[]{String.valueOf(id)});
             }
@@ -2789,6 +3230,8 @@ public class MainActivity extends Activity {
             v.put("roast_level", clean(bean.roastLevel, "未知烘焙"));
             v.put("flavor_tags", clean(bean.flavorTags, "风味待补充"));
             v.put("image_uris", cleanOptional(bean.imageUris));
+            v.put("package_image_uris", cleanOptional(bean.packageImageUris));
+            v.put("bean_image_uris", cleanOptional(bean.beanImageUris));
             v.put("total_gram", Math.max(bean.totalGram, 0));
             v.put("remaining_gram", Math.max(bean.remainingGram, 0));
             v.put("price", Math.max(bean.price, 0));
@@ -2799,6 +3242,10 @@ public class MainActivity extends Activity {
         }
 
         void addBrew(long beanId, String date, String brewTime, String method, double dose, double water, String grind, int temp, String time, double score, String note) {
+            addBrew(beanId, date, brewTime, method, dose, water, grind, temp, time, score, note, "");
+        }
+
+        void addBrew(long beanId, String date, String brewTime, String method, double dose, double water, String grind, int temp, String time, double score, String note, String imageUris) {
             SQLiteDatabase db = getWritableDatabase();
             ContentValues v = new ContentValues();
             v.put("bean_id", beanId);
@@ -2812,6 +3259,7 @@ public class MainActivity extends Activity {
             v.put("time", clean(time, "未记录"));
             v.put("score", score);
             v.put("note", clean(note, ""));
+            v.put("image_uris", cleanOptional(imageUris));
             db.insert("brews", null, v);
             db.execSQL("UPDATE beans SET remaining_gram = MAX(0, remaining_gram - ?) WHERE id = ?", new Object[]{dose, beanId});
         }
@@ -2821,6 +3269,22 @@ public class MainActivity extends Activity {
             v.put("date", cleanBrewDate(date));
             v.put("brew_time", cleanBrewTime(brewTime));
             getWritableDatabase().update("brews", v, "id = ?", new String[]{String.valueOf(brewId)});
+        }
+
+        void moveBrewToBean(long brewId, long oldBeanId, long newBeanId, double dose) {
+            if (oldBeanId == newBeanId) return;
+            SQLiteDatabase db = getWritableDatabase();
+            db.beginTransaction();
+            try {
+                ContentValues v = new ContentValues();
+                v.put("bean_id", newBeanId);
+                db.update("brews", v, "id = ?", new String[]{String.valueOf(brewId)});
+                db.execSQL("UPDATE beans SET remaining_gram = MIN(total_gram, remaining_gram + ?) WHERE id = ?", new Object[]{dose, oldBeanId});
+                db.execSQL("UPDATE beans SET remaining_gram = MAX(0, remaining_gram - ?) WHERE id = ?", new Object[]{dose, newBeanId});
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
+            }
         }
 
         List<Bean> beans() {
@@ -3041,6 +3505,68 @@ public class MainActivity extends Activity {
             return out;
         }
 
+        List<ChartItem> priceBuckets() {
+            double[] buckets = new double[5];
+            Cursor c = getReadableDatabase().rawQuery("SELECT price, total_gram FROM beans", null);
+            while (c.moveToNext()) {
+                double total = c.getDouble(1);
+                double unitPrice = total <= 0 ? 0 : c.getDouble(0) / total;
+                if (unitPrice < 0.2) buckets[0]++;
+                else if (unitPrice < 0.5) buckets[1]++;
+                else if (unitPrice < 1.0) buckets[2]++;
+                else if (unitPrice <= 2.0) buckets[3]++;
+                else buckets[4]++;
+            }
+            c.close();
+            List<ChartItem> out = new ArrayList<>();
+            out.add(new ChartItem("< ¥0.20/g", buckets[0]));
+            out.add(new ChartItem("¥0.20-0.49/g", buckets[1]));
+            out.add(new ChartItem("¥0.50-0.99/g", buckets[2]));
+            out.add(new ChartItem("¥1.00-2.00/g", buckets[3]));
+            out.add(new ChartItem("> ¥2.00/g", buckets[4]));
+            return out;
+        }
+
+        List<ChartItem> monthlyPurchaseSpend() {
+            List<ChartItem> out = new ArrayList<>();
+            Cursor c = getReadableDatabase().rawQuery(
+                    "SELECT substr(purchase_date,1,7), COALESCE(SUM(price),0) FROM beans " +
+                            "WHERE purchase_date IS NOT NULL AND length(purchase_date) >= 7 " +
+                            "GROUP BY substr(purchase_date,1,7) ORDER BY substr(purchase_date,1,7) DESC LIMIT 6", null);
+            while (c.moveToNext()) out.add(new ChartItem(c.getString(0), c.getDouble(1)));
+            c.close();
+            Collections.reverse(out);
+            return out;
+        }
+
+        List<ChartItem> originCounts() {
+            List<ChartItem> out = new ArrayList<>();
+            Cursor c = getReadableDatabase().rawQuery("SELECT origin FROM beans", null);
+            while (c.moveToNext()) {
+                String[] origins = clean(c.getString(0), "未知产区").split("[,，、;；/&]+");
+                for (String origin : origins) {
+                    String name = origin.trim();
+                    if (name.isEmpty()) continue;
+                    ChartItem found = null;
+                    for (ChartItem item : out) if (item.label.equals(name)) { found = item; break; }
+                    if (found == null) out.add(new ChartItem(name, 1));
+                    else found.value++;
+                }
+            }
+            c.close();
+            Collections.sort(out, (a, b) -> Double.compare(b.value, a.value));
+            if (out.size() > 8) return new ArrayList<>(out.subList(0, 8));
+            return out;
+        }
+
+        LocalDate lastBrewDate(long[] beanIds) {
+            Cursor c = getReadableDatabase().rawQuery("SELECT MAX(date) FROM brews WHERE bean_id IN " + inClause(beanIds), null);
+            LocalDate result = LocalDate.now();
+            if (c.moveToFirst()) result = parse(c.getString(0));
+            c.close();
+            return result;
+        }
+
         List<ChartItem> hourCounts() {
             List<ChartItem> out = new ArrayList<>();
             int[] counts = new int[24];
@@ -3064,10 +3590,7 @@ public class MainActivity extends Activity {
 
         private String shortBeanType(String raw) {
             String value = clean(raw, DEFAULT_BEAN_TYPE);
-            int slash = value.indexOf("/");
-            if (slash > 0) value = value.substring(0, slash).trim();
-            if (value.length() > 8) value = value.substring(0, 8);
-            return value;
+            return value.replaceAll("\\s*/\\s*[A-Za-z][A-Za-z .'-]*", "").trim();
         }
 
         List<ChartItem> scoreBuckets() {
@@ -3159,6 +3682,8 @@ public class MainActivity extends Activity {
             b.roastLevel = c.getString(c.getColumnIndexOrThrow("roast_level"));
             b.flavorTags = c.getString(c.getColumnIndexOrThrow("flavor_tags"));
             b.imageUris = cleanOptional(c.getString(c.getColumnIndexOrThrow("image_uris")));
+            b.packageImageUris = cleanOptional(c.getString(c.getColumnIndexOrThrow("package_image_uris")));
+            b.beanImageUris = cleanOptional(c.getString(c.getColumnIndexOrThrow("bean_image_uris")));
             b.totalGram = c.getDouble(c.getColumnIndexOrThrow("total_gram"));
             b.remainingGram = c.getDouble(c.getColumnIndexOrThrow("remaining_gram"));
             b.price = c.getDouble(c.getColumnIndexOrThrow("price"));
@@ -3184,6 +3709,7 @@ public class MainActivity extends Activity {
             b.time = c.getString(c.getColumnIndexOrThrow("time"));
             b.score = c.getDouble(c.getColumnIndexOrThrow("score"));
             b.note = c.getString(c.getColumnIndexOrThrow("note"));
+            b.imageUris = cleanOptional(c.getString(c.getColumnIndexOrThrow("image_uris")));
             return b;
         }
 
