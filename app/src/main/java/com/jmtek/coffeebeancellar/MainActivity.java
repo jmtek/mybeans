@@ -19,6 +19,7 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
@@ -116,8 +117,7 @@ public class MainActivity extends Activity {
         };
         db = new CoffeeDb(this);
         db.seedIfEmpty();
-        buildShell();
-        render();
+        showSplash();
     }
 
     @Override
@@ -163,6 +163,19 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(Color.TRANSPARENT);
         shell.addView(root, new FrameLayout.LayoutParams(-1, -1));
         setContentView(shell);
+    }
+
+    private void showSplash() {
+        FrameLayout splash = new FrameLayout(this);
+        ImageView art = new ImageView(this);
+        art.setImageResource(getResources().getIdentifier("splash_coffee_cellar", "drawable", getPackageName()));
+        art.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        splash.addView(art, new FrameLayout.LayoutParams(-1, -1));
+        setContentView(splash);
+        new Handler(getMainLooper()).postDelayed(() -> {
+            buildShell();
+            render();
+        }, 1250);
     }
 
     private void render() {
@@ -350,10 +363,11 @@ public class MainActivity extends Activity {
         options.add("全部");
         if (which == 0) {
             options.add("拼配");
+            options.add("单一产地");
             Collections.addAll(options, BEAN_TYPES);
         }
         for (Bean bean : db.beanGroups()) {
-            String value = which == 0 ? (bean.isBlend ? "拼配" : normalizeBeanTypes(bean.beanType)) : which == 1 ? bean.roastLevel : which == 2 ? bean.process : bean.roaster;
+            String value = which == 0 ? productTypeName(bean) : which == 1 ? bean.roastLevel : which == 2 ? bean.process : bean.roaster;
             if (value != null && !value.trim().isEmpty() && !options.contains(value)) options.add(value);
         }
         new AlertDialog.Builder(this).setTitle("筛选" + label)
@@ -368,7 +382,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean matchesBeanFilter(Bean bean) {
-        return ("全部".equals(beanTypeFilter) || ("拼配".equals(beanTypeFilter) ? bean.isBlend : beanTypeFilter.equals(normalizeBeanTypes(bean.beanType))))
+        return ("全部".equals(beanTypeFilter) || ("拼配".equals(beanTypeFilter) ? bean.isBlend : "单一产地".equals(beanTypeFilter) ? bean.isSingleOrigin : containsBeanType(bean, beanTypeFilter)))
                 && ("全部".equals(roastFilter) || roastFilter.equals(bean.roastLevel))
                 && ("全部".equals(processFilter) || processFilter.equals(bean.process))
                 && ("全部".equals(roasterFilter) || roasterFilter.equals(bean.roaster));
@@ -388,7 +402,7 @@ public class MainActivity extends Activity {
         name.setPadding(0, dp(9), 0, 0);
         name.setMaxLines(2);
         card.addView(name);
-        TextView meta = text(bean.roaster + " · " + (bean.isBlend ? "拼配 · " : "") + bean.beanType, 11, MUTED, false);
+        TextView meta = text(bean.roaster + " · " + productTypeName(bean) + (isBlank(beanTypeLabel(bean)) ? "" : " · " + beanTypeLabel(bean)), 11, MUTED, false);
         meta.setPadding(0, dp(3), 0, 0);
         meta.setMaxLines(2);
         card.addView(meta);
@@ -436,15 +450,9 @@ public class MainActivity extends Activity {
         titleRow.addView(text(bean.name, 20, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
         titleRow.addView(stockRing(bean), new LinearLayout.LayoutParams(dp(48), dp(48)));
         names.addView(titleRow);
-        TextView meta = text(bean.roaster + " · " + (bean.isBlend ? "拼配 · " : "") + bean.beanType + " · " + bean.origin + " · " + bean.process, 12, MUTED, false);
+        TextView meta = text(bean.roaster + " · " + productTypeName(bean) + (isBlank(beanTypeLabel(bean)) ? "" : " · " + beanTypeLabel(bean)) + " · " + bean.origin + " · " + bean.process, 12, MUTED, false);
         meta.setPadding(0, dp(3), 0, 0);
         names.addView(meta);
-        if (!isBlank(bean.blendDetails)) {
-            TextView blend = text("拼配：" + bean.blendDetails, 11, GREEN_DARK, false);
-            blend.setPadding(0, dp(3), 0, 0);
-            blend.setMaxLines(2);
-            names.addView(blend);
-        }
         TextView roast = statusBadge(bean.roastLevel, AMBER_SOFT, AMBER);
         LinearLayout.LayoutParams roastLp = new LinearLayout.LayoutParams(-2, -2);
         roastLp.setMargins(0, dp(7), 0, 0);
@@ -644,27 +652,32 @@ public class MainActivity extends Activity {
         list.setOrientation(LinearLayout.VERTICAL);
         LocalDate today = LocalDate.now();
         List<FutureBeanEvent> events = new ArrayList<>();
-        for (Bean bean : beans) {
-            LocalDate ready = date(bean.roastDate).plusDays(7);
-            long readyDays = ChronoUnit.DAYS.between(today, ready);
-            if (readyDays >= -7 && readyDays <= 30) {
-                String detail = readyDays < 0 ? "已养好 " + (-readyDays) + " 天" : readyDays == 0 ? "今天养豆完成" : "还有 " + readyDays + " 天养好豆";
-                events.add(new FutureBeanEvent(ready, bean.name + " 养豆完成", detail, bean.roaster + " · " + bean.process, "养", GREEN_SOFT, GREEN_DARK));
-            }
-            if (isConsumed(bean)) {
-                LocalDate emptyDate = db.lastBrewDate(bean.batchIds());
-                long emptyDays = ChronoUnit.DAYS.between(today, emptyDate);
-                if (emptyDays >= -7 && emptyDays <= 0) {
-                    events.add(new FutureBeanEvent(emptyDate, bean.name + " 已喝完", "已消耗完，不再提示赏味期", bean.roaster + " · " + bean.process, "空", CREAM, MUTED));
+        for (Bean group : beans) {
+            List<Bean> batches = group.batchesOrSelf();
+            for (int index = 0; index < batches.size(); index++) {
+                Bean bean = batches.get(index);
+                String batchName = group.name + (batches.size() > 1 ? " · " + bean.roastDate + " 批次" : "");
+                LocalDate ready = date(bean.roastDate).plusDays(7);
+                long readyDays = ChronoUnit.DAYS.between(today, ready);
+                if (readyDays >= -7 && readyDays <= 30) {
+                    String detail = readyDays < 0 ? "已养好 " + (-readyDays) + " 天" : readyDays == 0 ? "今天养豆完成" : "还有 " + readyDays + " 天养好豆";
+                    events.add(new FutureBeanEvent(ready, batchName + " 养豆完成", detail, bean.roaster + " · " + bean.process, "养", GREEN_SOFT, GREEN_DARK));
                 }
-                continue;
+                if (isConsumed(bean)) {
+                    LocalDate emptyDate = db.lastBrewDate(new long[]{bean.id});
+                    long emptyDays = ChronoUnit.DAYS.between(today, emptyDate);
+                    if (emptyDays >= -7 && emptyDays <= 0) {
+                        events.add(new FutureBeanEvent(emptyDate, batchName + " 已喝完", "已消耗完，不再提示赏味期", bean.roaster + " · " + bean.process, "空", CREAM, MUTED));
+                    }
+                    continue;
+                }
+                LocalDate best = date(cleanBestBefore(bean));
+                long days = ChronoUnit.DAYS.between(today, best);
+                if (days < -7 || days > 30) continue;
+                String detail = days < 0 ? "已过赏味期 " + (-days) + " 天" : days == 0 ? "今天到达赏味节点" : "还有 " + days + " 天 · " + drinkingWindow(bean);
+                detail += " · 当前约剩 " + bestRecipeCups(bean) + " 杯";
+                events.add(new FutureBeanEvent(best, batchName + " 赏味节点", detail, bean.roaster + " · " + bean.process, "赏", AMBER_SOFT, AMBER));
             }
-            LocalDate best = date(cleanBestBefore(bean));
-            long days = ChronoUnit.DAYS.between(today, best);
-            if (days < -7 || days > 30) continue;
-            String detail = days < 0 ? "已过赏味期 " + (-days) + " 天" : days == 0 ? "今天到达赏味节点" : "还有 " + days + " 天 · " + drinkingWindow(bean);
-            detail += " · 当前约剩 " + bestRecipeCups(bean) + " 杯";
-            events.add(new FutureBeanEvent(best, bean.name + " 赏味节点", detail, bean.roaster + " · " + bean.process, "赏", AMBER_SOFT, AMBER));
         }
         Collections.sort(events, (a, b) -> a.date.compareTo(b.date));
         for (int i = 0; i < events.size(); i++) {
@@ -1966,14 +1979,13 @@ public class MainActivity extends Activity {
         boolean editing = bean != null;
         EditText name = input("豆子名称", editing ? bean.name : "花蝴蝶");
         EditText roaster = input("烘焙商", editing ? bean.roaster : "Fisher Coffee");
-        final String[] selectedBeanTypes = {normalizeBeanTypes(editing ? bean.beanType : DEFAULT_BEAN_TYPE)};
-        TextView beanType = choiceField(selectedBeanTypes[0]);
-        beanType.setOnClickListener(v -> showBeanTypeDialog(beanType, selectedBeanTypes));
-        final boolean[] isBlend = {editing && bean.isBlend};
-        TextView productType = choiceField(isBlend[0] ? "拼配" : "单品");
-        productType.setOnClickListener(v -> showProductTypeDialog(productType, isBlend));
+        final String[] selectedBeanTypes = {editing ? bean.beanType : DEFAULT_BEAN_TYPE};
+        final String[] productKind = {editing ? productTypeName(bean) : "单品"};
+        TextView beanType = choiceField(beanTypesChoiceLabel(selectedBeanTypes[0], supportsMultipleBeanTypes(productKind[0])));
+        TextView productType = choiceField(productKind[0]);
+        productType.setOnClickListener(v -> showProductTypeDialog(productType, productKind, selectedBeanTypes, beanType));
+        beanType.setOnClickListener(v -> { if (supportsMultipleBeanTypes(productKind[0])) showBlendBeanTypeDialog(beanType, selectedBeanTypes); else showBeanTypeDialog(beanType, selectedBeanTypes); });
         EditText origin = input("产地", editing ? bean.origin : "埃塞俄比亚");
-        EditText blendDetails = input("拼配构成（可选）", editing ? bean.blendDetails : "");
         EditText process = input("处理法", editing ? bean.process : "日晒");
         EditText roast = input("烘焙度", editing ? bean.roastLevel : "浅烘");
         EditText tags = input("风味标签", editing ? bean.flavorTags : "莓果,花香,柑橘");
@@ -1991,11 +2003,10 @@ public class MainActivity extends Activity {
                 formSection("基本信息",
                         labeled("豆子名称", name),
                         labeled("烘焙商", roaster),
-                        labeled("产品类型", productType),
-                        labeled("豆种", beanType)),
+                        labeled("产品类型", productType)),
                 formSection("产地与风味",
+                        labeled("豆种", beanType),
                         labeled("产地", origin),
-                        labeled("拼配构成（可选）", blendDetails),
                         labeled("处理法", process),
                         labeled("烘焙度", roast),
                         labeled("风味标签", tags)),
@@ -2022,9 +2033,10 @@ public class MainActivity extends Activity {
                     updated.name = name.getText().toString();
                     updated.roaster = roaster.getText().toString();
                     updated.beanType = selectedBeanTypes[0];
-                    updated.isBlend = isBlend[0];
+                    updated.isBlend = "拼配".equals(productKind[0]);
+                    updated.isSingleOrigin = "单一产地".equals(productKind[0]);
                     updated.origin = origin.getText().toString();
-                    updated.blendDetails = blendDetails.getText().toString();
+                    updated.blendDetails = "";
                     updated.process = process.getText().toString();
                     updated.roastLevel = roast.getText().toString();
                     updated.flavorTags = tags.getText().toString();
@@ -2055,14 +2067,13 @@ public class MainActivity extends Activity {
         LinearLayout form = form();
         EditText name = input("豆子名称", bean.name);
         EditText roaster = input("烘焙商", bean.roaster);
-        final String[] selectedBeanTypes = {normalizeBeanTypes(bean.beanType)};
-        TextView beanType = choiceField(selectedBeanTypes[0]);
-        beanType.setOnClickListener(v -> showBeanTypeDialog(beanType, selectedBeanTypes));
-        final boolean[] isBlend = {bean.isBlend};
-        TextView productType = choiceField(isBlend[0] ? "拼配" : "单品");
-        productType.setOnClickListener(v -> showProductTypeDialog(productType, isBlend));
+        final String[] selectedBeanTypes = {bean.beanType};
+        final String[] productKind = {productTypeName(bean)};
+        TextView beanType = choiceField(beanTypesChoiceLabel(selectedBeanTypes[0], supportsMultipleBeanTypes(productKind[0])));
+        TextView productType = choiceField(productKind[0]);
+        productType.setOnClickListener(v -> showProductTypeDialog(productType, productKind, selectedBeanTypes, beanType));
+        beanType.setOnClickListener(v -> { if (supportsMultipleBeanTypes(productKind[0])) showBlendBeanTypeDialog(beanType, selectedBeanTypes); else showBeanTypeDialog(beanType, selectedBeanTypes); });
         EditText origin = input("产地", bean.origin);
-        EditText blendDetails = input("拼配构成（可选）", bean.blendDetails);
         EditText process = input("处理法", bean.process);
         EditText roast = input("烘焙度", bean.roastLevel);
         EditText tags = input("风味标签", bean.flavorTags);
@@ -2072,11 +2083,10 @@ public class MainActivity extends Activity {
                 formSection("基本信息",
                         labeled("豆子名称", name),
                         labeled("烘焙商", roaster),
-                        labeled("产品类型", productType),
-                        labeled("豆种", beanType)),
+                        labeled("产品类型", productType)),
                 formSection("产地与风味",
+                        labeled("豆种", beanType),
                         labeled("产地", origin),
-                        labeled("拼配构成（可选）", blendDetails),
                         labeled("处理法", process),
                         labeled("烘焙度", roast),
                         labeled("风味标签", tags)),
@@ -2108,9 +2118,10 @@ public class MainActivity extends Activity {
                         updated.name = name.getText().toString();
                         updated.roaster = roaster.getText().toString();
                         updated.beanType = selectedBeanTypes[0];
-                        updated.isBlend = isBlend[0];
+                        updated.isBlend = "拼配".equals(productKind[0]);
+                        updated.isSingleOrigin = "单一产地".equals(productKind[0]);
                         updated.origin = origin.getText().toString();
-                        updated.blendDetails = blendDetails.getText().toString();
+                        updated.blendDetails = "";
                         updated.process = process.getText().toString();
                         updated.roastLevel = roast.getText().toString();
                         updated.flavorTags = tags.getText().toString();
@@ -2281,7 +2292,6 @@ public class MainActivity extends Activity {
         box.setPadding(dp(12), dp(4), dp(12), dp(4));
         box.addView(text(bean.name, 22, INK, true));
         box.addView(text(bean.roaster + " · " + bean.beanType + " · " + bean.origin + " · " + bean.process, 14, MUTED, false));
-        if (!isBlank(bean.blendDetails)) box.addView(text("拼配构成：" + bean.blendDetails, 13, GREEN_DARK, false));
         box.addView(tagRow(bean.flavorTags));
 
         TextView batchTitle = text("批次节点", 15, GREEN_DARK, true);
@@ -2438,6 +2448,38 @@ public class MainActivity extends Activity {
         return value.replaceAll("\\s*/\\s*[A-Za-z][A-Za-z .'-]*", "").trim();
     }
 
+    private boolean containsBeanType(Bean bean, String type) {
+        if (isBlank(type)) return false;
+        for (String selected : selectedBeanTypes(bean.beanType)) if (type.equals(selected)) return true;
+        return false;
+    }
+
+    private List<String> selectedBeanTypes(String raw) {
+        List<String> out = new ArrayList<>();
+        String value = raw == null ? "" : raw;
+        for (String type : BEAN_TYPES) if (value.contains(type)) out.add(type);
+        return out;
+    }
+
+    private String beanTypesChoiceLabel(String raw, boolean isBlend) {
+        if (isBlend && selectedBeanTypes(raw).isEmpty()) return "豆种未知（可不选）";
+        if (isBlend) return selectedBeanTypes(raw).size() + " 种豆种已选";
+        return normalizeBeanTypes(raw);
+    }
+
+    private boolean supportsMultipleBeanTypes(String productType) {
+        return "单一产地".equals(productType) || "拼配".equals(productType);
+    }
+
+    private String productTypeName(Bean bean) {
+        return bean.isBlend ? "拼配" : bean.isSingleOrigin ? "单一产地" : "单品";
+    }
+
+    private String beanTypeLabel(Bean bean) {
+        if (supportsMultipleBeanTypes(productTypeName(bean)) && selectedBeanTypes(bean.beanType).isEmpty()) return "";
+        return bean.beanType;
+    }
+
     private String drinkHint(Bean bean) {
         String window = drinkingWindow(bean);
         if ("过峰值".equals(window) || "尾段".equals(window)) return "已过赏味期，建议先喝完它，再开新的。";
@@ -2592,15 +2634,32 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    private void showProductTypeDialog(TextView trigger, boolean[] isBlend) {
-        String[] options = {"单品", "拼配"};
+    private void showProductTypeDialog(TextView trigger, String[] productKind, String[] selectedBeanTypes, TextView beanTypeTrigger) {
+        String[] options = {"单品", "单一产地", "拼配"};
+        int selected = 0;
+        for (int i = 0; i < options.length; i++) if (options[i].equals(productKind[0])) selected = i;
         new AlertDialog.Builder(this)
                 .setTitle("选择产品类型")
-                .setSingleChoiceItems(options, isBlend[0] ? 1 : 0, (dialog, which) -> {
-                    isBlend[0] = which == 1;
+                .setSingleChoiceItems(options, selected, (dialog, which) -> {
+                    productKind[0] = options[which];
+                    if (!supportsMultipleBeanTypes(productKind[0])) selectedBeanTypes[0] = normalizeBeanTypes(selectedBeanTypes[0]);
                     trigger.setText(options[which] + "  ▾");
+                    beanTypeTrigger.setText(beanTypesChoiceLabel(selectedBeanTypes[0], supportsMultipleBeanTypes(productKind[0])) + "  ▾");
                     dialog.dismiss();
                 }).show();
+    }
+
+    private void showBlendBeanTypeDialog(TextView trigger, String[] selectedBeanTypes) {
+        boolean[] checked = checkedTypes(selectedBeanTypes[0]);
+        new AlertDialog.Builder(this)
+                .setTitle("选择拼配豆种（可不选）")
+                .setMultiChoiceItems(BEAN_TYPES, checked, (dialog, which, isChecked) -> checked[which] = isChecked)
+                .setPositiveButton("确定", (dialog, which) -> {
+                    selectedBeanTypes[0] = joinTypes(checked);
+                    trigger.setText(beanTypesChoiceLabel(selectedBeanTypes[0], true) + "  ▾");
+                })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     private EditText bestBeforeInput(EditText roastDate, String value) {
@@ -2676,9 +2735,8 @@ public class MainActivity extends Activity {
 
     private boolean[] checkedTypes(String value) {
         boolean[] checked = new boolean[BEAN_TYPES.length];
-        String normalized = normalizeBeanTypes(value);
         for (int i = 0; i < BEAN_TYPES.length; i++) {
-            checked[i] = normalized.contains(BEAN_TYPES[i]);
+            checked[i] = value != null && value.contains(BEAN_TYPES[i]);
         }
         return checked;
     }
@@ -2690,7 +2748,7 @@ public class MainActivity extends Activity {
             if (out.length() > 0) out.append("、");
             out.append(BEAN_TYPES[i]);
         }
-        return out.length() == 0 ? DEFAULT_BEAN_TYPE : out.toString();
+        return out.toString();
     }
 
     private String normalizeBeanTypes(String raw) {
@@ -3018,6 +3076,7 @@ public class MainActivity extends Activity {
         String flavorTags;
         String blendDetails;
         boolean isBlend;
+        boolean isSingleOrigin;
         String imageUris;
         String packageImageUris;
         String beanImageUris;
@@ -3042,6 +3101,7 @@ public class MainActivity extends Activity {
             b.flavorTags = flavorTags;
             b.blendDetails = blendDetails;
             b.isBlend = isBlend;
+            b.isSingleOrigin = isSingleOrigin;
             b.imageUris = imageUris;
             b.packageImageUris = packageImageUris;
             b.beanImageUris = beanImageUris;
@@ -3057,7 +3117,7 @@ public class MainActivity extends Activity {
         }
 
         String groupKey() {
-            return cleanKey(name) + "|" + cleanKey(roaster) + "|" + isBlend + "|" + cleanKey(beanType) + "|" + cleanKey(origin) + "|" + cleanKey(process) + "|" + cleanKey(roastLevel) + "|" + cleanKey(flavorTags) + "|" + cleanKey(blendDetails);
+            return cleanKey(name) + "|" + cleanKey(roaster) + "|" + isBlend + "|" + isSingleOrigin + "|" + cleanKey(beanType) + "|" + cleanKey(origin) + "|" + cleanKey(process) + "|" + cleanKey(roastLevel) + "|" + cleanKey(flavorTags);
         }
 
         List<Bean> batchesOrSelf() {
@@ -3161,12 +3221,12 @@ public class MainActivity extends Activity {
 
     static class CoffeeDb extends SQLiteOpenHelper {
         CoffeeDb(Context context) {
-            super(context, "coffee_cellar.db", null, 10);
+            super(context, "coffee_cellar.db", null, 11);
         }
 
         @Override
         public void onCreate(SQLiteDatabase db) {
-            db.execSQL("CREATE TABLE beans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,roaster TEXT,bean_type TEXT,is_blend INTEGER DEFAULT 0,origin TEXT,process TEXT,roast_level TEXT,flavor_tags TEXT,blend_details TEXT,image_uris TEXT,package_image_uris TEXT,bean_image_uris TEXT,total_gram REAL,remaining_gram REAL,price REAL,purchase_date TEXT,roast_date TEXT,open_date TEXT,best_before_date TEXT)");
+            db.execSQL("CREATE TABLE beans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,roaster TEXT,bean_type TEXT,is_blend INTEGER DEFAULT 0,is_single_origin INTEGER DEFAULT 0,origin TEXT,process TEXT,roast_level TEXT,flavor_tags TEXT,blend_details TEXT,image_uris TEXT,package_image_uris TEXT,bean_image_uris TEXT,total_gram REAL,remaining_gram REAL,price REAL,purchase_date TEXT,roast_date TEXT,open_date TEXT,best_before_date TEXT)");
             db.execSQL("CREATE TABLE brews(id INTEGER PRIMARY KEY AUTOINCREMENT,bean_id INTEGER,date TEXT,brew_time TEXT,method TEXT,dose REAL,water REAL,grind TEXT,temp INTEGER,time TEXT,score REAL,note TEXT,image_uris TEXT)");
         }
 
@@ -3197,6 +3257,7 @@ public class MainActivity extends Activity {
             if (oldVersion < 8) db.execSQL("ALTER TABLE brews ADD COLUMN image_uris TEXT");
             if (oldVersion < 9) db.execSQL("ALTER TABLE beans ADD COLUMN blend_details TEXT");
             if (oldVersion < 10) db.execSQL("ALTER TABLE beans ADD COLUMN is_blend INTEGER DEFAULT 0");
+            if (oldVersion < 11) db.execSQL("ALTER TABLE beans ADD COLUMN is_single_origin INTEGER DEFAULT 0");
         }
 
         void seedIfEmpty() {
@@ -3250,8 +3311,9 @@ public class MainActivity extends Activity {
             ContentValues v = new ContentValues();
             v.put("name", clean(bean.name, "未命名豆子"));
             v.put("roaster", clean(bean.roaster, "未知烘焙商"));
-            v.put("bean_type", clean(bean.beanType, DEFAULT_BEAN_TYPE));
+            v.put("bean_type", (bean.isBlend || bean.isSingleOrigin) ? cleanOptional(bean.beanType) : clean(bean.beanType, DEFAULT_BEAN_TYPE));
             v.put("is_blend", bean.isBlend ? 1 : 0);
+            v.put("is_single_origin", bean.isSingleOrigin ? 1 : 0);
             v.put("origin", clean(bean.origin, "未知产地"));
             v.put("process", clean(bean.process, "未知处理"));
             v.put("roast_level", clean(bean.roastLevel, "未知烘焙"));
@@ -3278,8 +3340,9 @@ public class MainActivity extends Activity {
         private void putBeanValues(ContentValues v, Bean bean) {
             v.put("name", clean(bean.name, "未命名豆子"));
             v.put("roaster", clean(bean.roaster, "未知烘焙商"));
-            v.put("bean_type", clean(bean.beanType, DEFAULT_BEAN_TYPE));
+            v.put("bean_type", (bean.isBlend || bean.isSingleOrigin) ? cleanOptional(bean.beanType) : clean(bean.beanType, DEFAULT_BEAN_TYPE));
             v.put("is_blend", bean.isBlend ? 1 : 0);
+            v.put("is_single_origin", bean.isSingleOrigin ? 1 : 0);
             v.put("origin", clean(bean.origin, "未知产地"));
             v.put("process", clean(bean.process, "未知处理"));
             v.put("roast_level", clean(bean.roastLevel, "未知烘焙"));
@@ -3732,8 +3795,9 @@ public class MainActivity extends Activity {
             b.id = c.getLong(c.getColumnIndexOrThrow("id"));
             b.name = c.getString(c.getColumnIndexOrThrow("name"));
             b.roaster = c.getString(c.getColumnIndexOrThrow("roaster"));
-            b.beanType = clean(c.getString(c.getColumnIndexOrThrow("bean_type")), DEFAULT_BEAN_TYPE);
             b.isBlend = c.getInt(c.getColumnIndexOrThrow("is_blend")) == 1;
+            b.isSingleOrigin = c.getInt(c.getColumnIndexOrThrow("is_single_origin")) == 1;
+            b.beanType = (b.isBlend || b.isSingleOrigin) ? cleanOptional(c.getString(c.getColumnIndexOrThrow("bean_type"))) : clean(c.getString(c.getColumnIndexOrThrow("bean_type")), DEFAULT_BEAN_TYPE);
             b.origin = c.getString(c.getColumnIndexOrThrow("origin"));
             b.process = c.getString(c.getColumnIndexOrThrow("process"));
             b.roastLevel = c.getString(c.getColumnIndexOrThrow("roast_level"));
