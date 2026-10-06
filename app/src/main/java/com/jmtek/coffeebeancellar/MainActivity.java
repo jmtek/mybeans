@@ -96,7 +96,8 @@ public class MainActivity extends Activity {
     private FrameLayout shell;
     private String tab = "beans";
     private long brewBeanId = -1;
-    private boolean beanGalleryMode = false;
+    private boolean beanGalleryMode = true;
+    private String productTypeFilter = "全部";
     private String beanTypeFilter = "全部";
     private String roastFilter = "全部";
     private String processFilter = "全部";
@@ -311,6 +312,7 @@ public class MainActivity extends Activity {
             Bean bean = beans.get(i);
             GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
             lp.width = cell;
+            lp.height = dp(220);
             lp.setMargins(i % 2 == 0 ? 0 : dp(8), dp(4), 0, dp(4));
             grid.addView(beanGalleryCard(bean), lp);
         }
@@ -338,20 +340,26 @@ public class MainActivity extends Activity {
         galleryLp.setMargins(dp(6), 0, 0, 0);
         top.addView(gallery, galleryLp);
         box.addView(top);
-        LinearLayout filters = new LinearLayout(this);
-        filters.setOrientation(LinearLayout.HORIZONTAL);
-        filters.setPadding(0, dp(8), 0, 0);
-        addFilterButton(filters, "豆种", beanTypeFilter, 0);
-        addFilterButton(filters, "烘焙", roastFilter, 1);
-        addFilterButton(filters, "处理", processFilter, 2);
-        addFilterButton(filters, "品牌", roasterFilter, 3);
-        box.addView(filters);
+        LinearLayout filtersTop = new LinearLayout(this);
+        filtersTop.setOrientation(LinearLayout.HORIZONTAL);
+        filtersTop.setPadding(0, dp(8), 0, 0);
+        addFilterButton(filtersTop, "品类", productTypeFilter, 0);
+        addFilterButton(filtersTop, "豆种", beanTypeFilter, 1);
+        addFilterButton(filtersTop, "烘焙", roastFilter, 2);
+        box.addView(filtersTop);
+        LinearLayout filtersBottom = new LinearLayout(this);
+        filtersBottom.setOrientation(LinearLayout.HORIZONTAL);
+        filtersBottom.setPadding(0, dp(5), 0, 0);
+        addFilterButton(filtersBottom, "处理", processFilter, 3);
+        addFilterButton(filtersBottom, "品牌", roasterFilter, 4);
+        box.addView(filtersBottom);
         return box;
     }
 
     private void addFilterButton(LinearLayout row, String label, String value, int which) {
-        Button button = subtleButton(label + ("全部".equals(value) ? " ⌄" : " ●"));
-        button.setTextSize(11);
+        String shown = "豆种".equals(label) && !"全部".equals(value) ? shortBeanType(value) : value;
+        Button button = subtleButton(label + "：" + shown + " ▾");
+        button.setTextSize(10);
         button.setOnClickListener(v -> showBeanFilterDialog(label, which));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(38), 1);
         lp.setMargins(row.getChildCount() == 0 ? 0 : dp(5), 0, 0, 0);
@@ -362,27 +370,31 @@ public class MainActivity extends Activity {
         List<String> options = new ArrayList<>();
         options.add("全部");
         if (which == 0) {
-            options.add("拼配");
+            options.add("单品");
             options.add("单一产地");
+            options.add("拼配");
+        } else if (which == 1) {
             Collections.addAll(options, BEAN_TYPES);
         }
         for (Bean bean : db.beanGroups()) {
-            String value = which == 0 ? productTypeName(bean) : which == 1 ? bean.roastLevel : which == 2 ? bean.process : bean.roaster;
+            String value = which == 0 ? productTypeName(bean) : which == 1 ? normalizeBeanTypes(bean.beanType) : which == 2 ? bean.roastLevel : which == 3 ? bean.process : bean.roaster;
             if (value != null && !value.trim().isEmpty() && !options.contains(value)) options.add(value);
         }
         new AlertDialog.Builder(this).setTitle("筛选" + label)
                 .setItems(options.toArray(new String[0]), (d, position) -> {
                     String selected = options.get(position);
-                    if (which == 0) beanTypeFilter = selected;
-                    else if (which == 1) roastFilter = selected;
-                    else if (which == 2) processFilter = selected;
+                    if (which == 0) productTypeFilter = selected;
+                    else if (which == 1) beanTypeFilter = selected;
+                    else if (which == 2) roastFilter = selected;
+                    else if (which == 3) processFilter = selected;
                     else roasterFilter = selected;
                     render();
                 }).show();
     }
 
     private boolean matchesBeanFilter(Bean bean) {
-        return ("全部".equals(beanTypeFilter) || ("拼配".equals(beanTypeFilter) ? bean.isBlend : "单一产地".equals(beanTypeFilter) ? bean.isSingleOrigin : containsBeanType(bean, beanTypeFilter)))
+        return ("全部".equals(productTypeFilter) || productTypeFilter.equals(productTypeName(bean)))
+                && ("全部".equals(beanTypeFilter) || containsBeanType(bean, beanTypeFilter))
                 && ("全部".equals(roastFilter) || roastFilter.equals(bean.roastLevel))
                 && ("全部".equals(processFilter) || processFilter.equals(bean.process))
                 && ("全部".equals(roasterFilter) || roasterFilter.equals(bean.roaster));
@@ -395,29 +407,42 @@ public class MainActivity extends Activity {
     }
 
     private View beanGalleryCard(Bean bean) {
-        LinearLayout card = card();
-        card.setPadding(dp(10), dp(10), dp(10), dp(10));
-        card.addView(beanThumb(bean, dp(146), dp(14)), new LinearLayout.LayoutParams(-1, dp(146)));
-        TextView name = text(bean.name, 15, INK, true);
-        name.setPadding(0, dp(9), 0, 0);
+        FrameLayout card = new FrameLayout(this);
+        card.setBackground(round(CARD, dp(16), LINE));
+        card.setClipToOutline(true);
+        List<String> images = displayImages(bean);
+        View photo = beanThumb(bean, dp(260), dp(16));
+        card.addView(photo, new FrameLayout.LayoutParams(-1, -1));
+        if (!images.isEmpty()) photo.setOnClickListener(v -> showImagePreview(images.get(0)));
+
+        View shade = new View(this);
+        shade.setBackground(new android.graphics.drawable.GradientDrawable(android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{Color.argb(22, 0, 0, 0), Color.argb(185, 20, 13, 10)}));
+        card.addView(shade, new FrameLayout.LayoutParams(-1, -1));
+
+        FrameLayout.LayoutParams ringLp = new FrameLayout.LayoutParams(dp(44), dp(44), Gravity.TOP | Gravity.END);
+        ringLp.setMargins(0, dp(8), dp(8), 0);
+        card.addView(stockRing(bean), ringLp);
+
+        LinearLayout copy = new LinearLayout(this);
+        copy.setOrientation(LinearLayout.VERTICAL);
+        TextView name = text(bean.name, 16, INK, true);
         name.setMaxLines(2);
-        card.addView(name);
-        TextView meta = text(bean.roaster + " · " + productTypeName(bean) + (isBlank(beanTypeLabel(bean)) ? "" : " · " + beanTypeLabel(bean)), 11, MUTED, false);
-        meta.setPadding(0, dp(3), 0, 0);
-        meta.setMaxLines(2);
-        card.addView(meta);
-        LinearLayout foot = new LinearLayout(this);
-        foot.setGravity(Gravity.CENTER_VERTICAL);
+        copy.addView(name);
+        LinearLayout tags = new LinearLayout(this);
+        tags.setGravity(Gravity.CENTER_VERTICAL);
         TextView roast = statusBadge(bean.roastLevel, AMBER_SOFT, AMBER);
-        foot.addView(roast);
+        tags.addView(roast);
         TextView process = statusBadge(bean.process, GREEN_SOFT, GREEN_DARK);
-        LinearLayout.LayoutParams processLp = new LinearLayout.LayoutParams(0, -2, 1);
+        LinearLayout.LayoutParams processLp = new LinearLayout.LayoutParams(-2, -2);
         processLp.setMargins(dp(5), 0, 0, 0);
-        foot.addView(process, processLp);
-        foot.addView(stockRing(bean), new LinearLayout.LayoutParams(dp(36), dp(36)));
-        LinearLayout.LayoutParams footLp = new LinearLayout.LayoutParams(-1, dp(44));
-        footLp.setMargins(0, dp(5), 0, 0);
-        card.addView(foot, footLp);
+        tags.addView(process, processLp);
+        LinearLayout.LayoutParams tagsLp = new LinearLayout.LayoutParams(-1, -2);
+        tagsLp.setMargins(0, dp(6), 0, 0);
+        copy.addView(tags, tagsLp);
+        FrameLayout.LayoutParams copyLp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.START);
+        copyLp.setMargins(dp(10), 0, dp(10), dp(10));
+        card.addView(copy, copyLp);
         card.setOnClickListener(v -> showEditBeanDialog(bean));
         return card;
     }
