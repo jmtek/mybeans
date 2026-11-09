@@ -2,6 +2,8 @@ package com.jmtek.coffeebeancellar;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.DatePickerDialog;
+import android.app.TimePickerDialog;
 import android.content.ClipData;
 import android.content.ContentValues;
 import android.content.Context;
@@ -32,6 +34,7 @@ import android.widget.FrameLayout;
 import android.widget.GridLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.NumberPicker;
 import android.widget.ProgressBar;
 import android.widget.SeekBar;
 import android.widget.ScrollView;
@@ -39,6 +42,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.InputStream;
+import java.text.Collator;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
@@ -89,6 +93,13 @@ public class MainActivity extends Activity {
             "T5296 系"
     };
     private static final String DEFAULT_BEAN_TYPE = "铁皮卡 / Typica";
+    private static final String[] GRINDER_OPTIONS = {
+            "Comandante C40", "1Zpresso K-Ultra", "Timemore C3", "Fellow Ode", "电动磨豆机", "其他 / 未记录"
+    };
+    private static final String[] ORIGIN_OPTIONS = {"埃塞俄比亚", "哥伦比亚", "肯尼亚", "巴拿马", "危地马拉", "哥斯达黎加", "巴西", "印尼", "云南"};
+    private static final String[] PROCESS_OPTIONS = {"水洗", "日晒", "厌氧日晒", "厌氧水洗", "蜜处理", "湿刨", "双重发酵"};
+    private static final String[] ROAST_OPTIONS = {"浅烘", "浅中烘", "中烘", "中深烘", "深烘"};
+    private static final String[] FLAVOR_OPTIONS = {"花香", "柑橘", "莓果", "热带水果", "核果", "茶感", "蜂蜜", "焦糖", "巧克力", "坚果", "香料", "酒香"};
 
     private CoffeeDb db;
     private LinearLayout root;
@@ -102,6 +113,10 @@ public class MainActivity extends Activity {
     private String roastFilter = "全部";
     private String processFilter = "全部";
     private String roasterFilter = "全部";
+    private String beanSort = "烘焙日期";
+    private boolean includeConsumedBeans = true;
+    private BrewDraft brewDraft = new BrewDraft();
+    private ImageUploadField brewImageField;
     private ImageUploadField pendingImageField;
     private LruCache<String, Bitmap> imageCache;
     private final ExecutorService imageExecutor = Executors.newFixedThreadPool(2);
@@ -181,12 +196,14 @@ public class MainActivity extends Activity {
 
     private void render() {
         root.removeAllViews();
-        root.addView(header(), new LinearLayout.LayoutParams(-1, dp(20)));
+        root.addView(header(), new LinearLayout.LayoutParams(-1, dp(52)));
 
         ScrollView scroll = new ScrollView(this);
         content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(16), dp(8), dp(16), dp(88));
+        // Bottom navigation occupies its own layout row, so a large scroll inset here
+        // only creates a conspicuous blank area below short gallery grids.
+        content.setPadding(dp(16), dp(8), dp(16), dp(18));
         scroll.addView(content);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
@@ -195,15 +212,25 @@ public class MainActivity extends Activity {
         if ("stock".equals(tab)) renderStock();
         if ("stats".equals(tab)) renderStats();
         if ("alerts".equals(tab)) renderAlerts();
+        if ("photos".equals(tab)) renderPhotos();
 
         root.addView(nav(), new LinearLayout.LayoutParams(-1, dp(72)));
     }
 
     private View header() {
         LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(18), dp(10), dp(18), 0);
+        box.setOrientation(LinearLayout.HORIZONTAL);
+        box.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
+        box.setPadding(dp(18), dp(8), dp(18), 0);
         box.setBackgroundColor(Color.TRANSPARENT);
+        TextView bell = iconButton("🔔", INK, Color.argb(68, 34, 157, 139), Color.argb(90, 255, 255, 255));
+        bell.setTextSize(16);
+        bell.setContentDescription("打开注意啦");
+        bell.setOnClickListener(v -> {
+            tab = "alerts";
+            render();
+        });
+        box.addView(bell, new LinearLayout.LayoutParams(dp(36), dp(36)));
         return box;
     }
 
@@ -217,7 +244,7 @@ public class MainActivity extends Activity {
         addNav(nav, "stock", "▣", "剩多少", false);
         addNav(nav, "brew", "☕", "喝一杯", true);
         addNav(nav, "stats", "◌", "算一算", false);
-        addNav(nav, "alerts", "!", "注意啦", false);
+        addNav(nav, "photos", "▦", "冲煮册", false);
         return nav;
     }
 
@@ -254,23 +281,21 @@ public class MainActivity extends Activity {
 
         content.addView(beanBrowseControls(), fullMargin());
 
-        List<Bean> active = new ArrayList<>();
-        List<Bean> finished = new ArrayList<>();
+        List<Bean> beans = new ArrayList<>();
         for (Bean bean : db.beanGroups()) {
             if (!matchesBeanFilter(bean)) continue;
-            if (isConsumed(bean)) finished.add(bean);
-            else active.add(bean);
+            if (!includeConsumedBeans && isConsumed(bean)) continue;
+            beans.add(bean);
         }
 
-        addBeanCards(active);
-        addConsumedBeanSection(finished);
+        sortBeanCards(beans);
+        addBeanCards(beans);
     }
 
     private View beansHero() {
         LinearLayout hero = new LinearLayout(this);
         hero.setOrientation(LinearLayout.VERTICAL);
-        hero.setPadding(dp(16), dp(18), dp(12), dp(12));
-        hero.setBackground(round(Color.argb(68, 255, 255, 255), dp(16), LINE));
+        hero.setPadding(0, dp(8), 0, dp(8));
 
         LinearLayout top = new LinearLayout(this);
         top.setOrientation(LinearLayout.HORIZONTAL);
@@ -284,11 +309,6 @@ public class MainActivity extends Activity {
         copy.addView(sub);
         top.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
 
-        TextView add = circleButton("+", Color.WHITE, GREEN, GREEN_DARK);
-        add.setTextSize(24);
-        add.setContentDescription("新增豆子");
-        add.setOnClickListener(v -> showAddBeanDialog());
-        top.addView(add, new LinearLayout.LayoutParams(dp(48), dp(48)));
         hero.addView(top);
 
         return hero;
@@ -322,46 +342,73 @@ public class MainActivity extends Activity {
     private View beanBrowseControls() {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(12), dp(10), dp(12), dp(10));
-        box.setBackground(round(PANEL, dp(16), LINE));
+        box.setPadding(0, 0, 0, dp(6));
         LinearLayout top = new LinearLayout(this);
         top.setGravity(Gravity.CENTER_VERTICAL);
-        top.addView(text("快速筛选", 14, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
-        TextView list = iconButton("☷", GREEN_DARK, CREAM, LINE);
+        addFilterButton(top, "品类", productTypeFilter, 0, false);
+        addFilterButton(top, "豆种", beanTypeFilter, 1, false);
+        TextView sort = text(sortButtonLabel(), 12, GREEN_DARK, true);
+        sort.setGravity(Gravity.CENTER);
+        sort.setPadding(dp(3), 0, dp(3), 0);
+        sort.setBackground(round(Color.TRANSPARENT, 0, 0));
+        sort.setContentDescription("排序：" + beanSort);
+        sort.setClickable(true);
+        sort.setFocusable(true);
+        sort.setOnClickListener(v -> showBeanSortDialog());
+        top.addView(sort, new LinearLayout.LayoutParams(dp(52), dp(30)));
+        TextView spacer = new TextView(this);
+        top.addView(spacer, new LinearLayout.LayoutParams(0, 1, .18f));
+        TextView list = iconButton("☷", beanGalleryMode ? MUTED : GREEN_DARK, Color.TRANSPARENT, 0);
         list.setContentDescription("列表视图");
-        TextView gallery = iconButton("▦", GREEN_DARK, CREAM, LINE);
+        TextView gallery = iconButton("▦", beanGalleryMode ? GREEN : MUTED, Color.TRANSPARENT, 0);
         gallery.setContentDescription("画廊视图");
         list.setOnClickListener(v -> { beanGalleryMode = false; render(); });
         gallery.setOnClickListener(v -> { beanGalleryMode = true; render(); });
-        if (!beanGalleryMode) list.setBackground(round(GREEN_SOFT, dp(12), GREEN));
-        else gallery.setBackground(round(GREEN_SOFT, dp(12), GREEN));
-        top.addView(list, new LinearLayout.LayoutParams(dp(38), dp(34)));
-        LinearLayout.LayoutParams galleryLp = new LinearLayout.LayoutParams(dp(38), dp(34));
-        galleryLp.setMargins(dp(6), 0, 0, 0);
+        top.addView(list, new LinearLayout.LayoutParams(dp(30), dp(30)));
+        LinearLayout.LayoutParams galleryLp = new LinearLayout.LayoutParams(dp(30), dp(30));
+        galleryLp.setMargins(dp(3), 0, 0, 0);
         top.addView(gallery, galleryLp);
         box.addView(top);
-        LinearLayout filtersTop = new LinearLayout(this);
-        filtersTop.setOrientation(LinearLayout.HORIZONTAL);
-        filtersTop.setPadding(0, dp(8), 0, 0);
-        addFilterButton(filtersTop, "品类", productTypeFilter, 0);
-        addFilterButton(filtersTop, "豆种", beanTypeFilter, 1);
-        addFilterButton(filtersTop, "烘焙", roastFilter, 2);
-        box.addView(filtersTop);
         LinearLayout filtersBottom = new LinearLayout(this);
         filtersBottom.setOrientation(LinearLayout.HORIZONTAL);
         filtersBottom.setPadding(0, dp(5), 0, 0);
-        addFilterButton(filtersBottom, "处理", processFilter, 3);
-        addFilterButton(filtersBottom, "品牌", roasterFilter, 4);
+        addFilterButton(filtersBottom, "烘焙", roastFilter, 2, true);
+        addFilterButton(filtersBottom, "处理", processFilter, 3, true);
+        addFilterButton(filtersBottom, "品牌", roasterFilter, 4, true);
         box.addView(filtersBottom);
+
+        TextView consumedToggle = text((includeConsumedBeans ? "☑" : "☐") + " 含喝完的豆子", 12,
+                includeConsumedBeans ? GREEN_DARK : MUTED, true);
+        consumedToggle.setGravity(Gravity.CENTER_VERTICAL);
+        consumedToggle.setPadding(dp(4), dp(8), dp(4), dp(2));
+        consumedToggle.setContentDescription("是否包含已喝完的豆子");
+        consumedToggle.setClickable(true);
+        consumedToggle.setFocusable(true);
+        consumedToggle.setOnClickListener(v -> {
+            includeConsumedBeans = !includeConsumedBeans;
+            render();
+        });
+        box.addView(consumedToggle, new LinearLayout.LayoutParams(-2, dp(34)));
         return box;
     }
 
-    private void addFilterButton(LinearLayout row, String label, String value, int which) {
+    private void addFilterButton(LinearLayout row, String label, String value, int which, boolean framed) {
         String shown = "豆种".equals(label) && !"全部".equals(value) ? shortBeanType(value) : value;
-        Button button = subtleButton(label + "：" + shown + " ▾");
-        button.setTextSize(10);
+        // First-row filters are compact selectors; the second row deliberately keeps
+        // its field label so the three solid chips remain scannable at a glance.
+        String copy = framed
+                ? label + " · " + ("全部".equals(value) ? "全部" : trimFilterText(shown))
+                : ("全部".equals(value) ? "全部" + label : trimFilterText(shown));
+        Button button = subtleButton(copy + " ▾");
+        boolean active = !"全部".equals(value);
+        button.setTextSize(framed ? 12 : 13);
+        button.setTextColor(framed ? CREAM : (active ? GREEN_DARK : INK));
+        button.setPadding(dp(8), 0, dp(8), 0);
+        button.setBackground(framed
+                ? round(active ? Color.rgb(36, 112, 99) : Color.rgb(72, 59, 50), dp(10), Color.TRANSPARENT)
+                : round(Color.TRANSPARENT, 0, 0));
         button.setOnClickListener(v -> showBeanFilterDialog(label, which));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(38), 1);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, framed ? dp(34) : dp(30), 1);
         lp.setMargins(row.getChildCount() == 0 ? 0 : dp(5), 0, 0, 0);
         row.addView(button, lp);
     }
@@ -400,6 +447,50 @@ public class MainActivity extends Activity {
                 && ("全部".equals(roasterFilter) || roasterFilter.equals(bean.roaster));
     }
 
+    private String sortButtonLabel() {
+        if ("剩余库存".equals(beanSort)) return "库存 ↑";
+        return beanSort.substring(0, Math.min(2, beanSort.length())) + " ↓";
+    }
+
+    private void showBeanSortDialog() {
+        final String[] options = {"烘焙日期（新到旧）", "开封日期（新到旧）", "购入日期（新到旧）", "剩余库存（少到多）"};
+        new AlertDialog.Builder(this)
+                .setTitle("卡片排序")
+                .setItems(options, (d, position) -> {
+                    beanSort = position == 0 ? "烘焙日期" : position == 1 ? "开封日期"
+                            : position == 2 ? "购入日期" : "剩余库存";
+                    render();
+                }).show();
+    }
+
+    private void sortBeanCards(List<Bean> beans) {
+        Collections.sort(beans, (a, b) -> {
+            int result;
+            if ("剩余库存".equals(beanSort)) {
+                result = Double.compare(a.remainingGram, b.remainingGram);
+            } else {
+                result = latestBatchDate(b, beanSort).compareTo(latestBatchDate(a, beanSort));
+            }
+            if (result != 0) return result;
+            return a.name.compareToIgnoreCase(b.name);
+        });
+    }
+
+    private LocalDate latestBatchDate(Bean bean, String field) {
+        LocalDate latest = LocalDate.MIN;
+        for (Bean batch : bean.batchesOrSelf()) {
+            String raw = "开封日期".equals(field) ? batch.openDate
+                    : "购入日期".equals(field) ? batch.purchaseDate : batch.roastDate;
+            if (isBlank(raw)) continue;
+            try {
+                String normalized = raw.trim().length() > 10 ? raw.trim().substring(0, 10) : raw.trim();
+                LocalDate value = LocalDate.parse(normalized);
+                if (value.isAfter(latest)) latest = value;
+            } catch (Exception ignored) { }
+        }
+        return latest;
+    }
+
     private LinearLayout.LayoutParams badgeMargin() {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
         lp.setMargins(dp(6), 0, 0, 0);
@@ -420,9 +511,25 @@ public class MainActivity extends Activity {
                 new int[]{Color.argb(22, 0, 0, 0), Color.argb(185, 20, 13, 10)}));
         card.addView(shade, new FrameLayout.LayoutParams(-1, -1));
 
+        // Keep the existing translucent treatment, but tint it green so the brand
+        // remains legible over both dark and light bean photos.
+        TextView roaster = statusBadge(isBlank(bean.roaster) ? "未记录品牌" : bean.roaster,
+                Color.argb(58, 34, 157, 139), INK);
+        roaster.setMaxLines(1);
+        roaster.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        roaster.setContentDescription("品牌：" + bean.roaster);
+        FrameLayout.LayoutParams roasterLp = new FrameLayout.LayoutParams(dp(102), dp(30), Gravity.TOP | Gravity.START);
+        roasterLp.setMargins(dp(8), dp(8), 0, 0);
+        card.addView(roaster, roasterLp);
+
+        View ring = stockRing(bean);
+        ring.setContentDescription("查看 " + bean.name + " 的时间线");
+        ring.setClickable(true);
+        ring.setFocusable(true);
+        ring.setOnClickListener(v -> showTimeline(bean));
         FrameLayout.LayoutParams ringLp = new FrameLayout.LayoutParams(dp(44), dp(44), Gravity.TOP | Gravity.END);
         ringLp.setMargins(0, dp(8), dp(8), 0);
-        card.addView(stockRing(bean), ringLp);
+        card.addView(ring, ringLp);
 
         LinearLayout copy = new LinearLayout(this);
         copy.setOrientation(LinearLayout.VERTICAL);
@@ -441,8 +548,16 @@ public class MainActivity extends Activity {
         tagsLp.setMargins(0, dp(6), 0, 0);
         copy.addView(tags, tagsLp);
         FrameLayout.LayoutParams copyLp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.START);
-        copyLp.setMargins(dp(10), 0, dp(10), dp(10));
+        copyLp.setMargins(dp(10), 0, dp(48), dp(10));
         card.addView(copy, copyLp);
+
+        TextView edit = iconButton("✎", GREEN_DARK, CREAM, Color.rgb(220, 207, 185));
+        edit.setTextSize(17);
+        edit.setContentDescription("编辑豆子");
+        edit.setOnClickListener(v -> showEditBeanDialog(bean));
+        FrameLayout.LayoutParams editLp = new FrameLayout.LayoutParams(dp(32), dp(32), Gravity.BOTTOM | Gravity.END);
+        editLp.setMargins(0, 0, dp(9), dp(9));
+        card.addView(edit, editLp);
         card.setOnClickListener(v -> showEditBeanDialog(bean));
         return card;
     }
@@ -584,41 +699,65 @@ public class MainActivity extends Activity {
 
         final Bean currentPick = pick;
         BrewInputs inputs = new BrewInputs();
-        inputs.method = "手冲";
-        inputs.grind = "中细";
-        inputs.score = 42;
-        inputs.noteTags = new ArrayList<>();
+        inputs.method = brewDraft.method;
+        inputs.grind = brewDraft.grind;
+        inputs.grinder = brewDraft.grinder;
+        inputs.grindDial = brewDraft.grindDial;
+        inputs.score = brewDraft.score;
+        inputs.noteTags = new ArrayList<>(brewDraft.noteTags);
 
         content.addView(brewBeanPicker(currentPick), fullMargin());
         TextView hint = text("◷ 参数已按上一杯预填，按需调整", 12, MUTED, true);
         hint.setPadding(dp(6), dp(4), 0, dp(8));
         content.addView(hint);
 
-        EditText dose = numberInput("粉量", "15");
-        EditText water = numberInput("水量", "240");
-        EditText temp = numberInput("水温", "92");
-        EditText time = input("萃取时间", "2:30");
+        EditText dose = numberInput("粉量", brewDraft.dose);
+        EditText water = numberInput("水量", brewDraft.water);
+        EditText temp = numberInput("水温", brewDraft.temp);
+        EditText time = durationPickerInput(brewDraft.extractionTime);
         content.addView(formSection("冲煮方式", segmented("method", new String[]{"手冲", "意式", "爱乐压", "冷萃"}, inputs, () -> {
             dose.setText("20"); water.setText("36"); time.setText("0:30");
-        })), fullMargin());
+        }, () -> brewDraft.method = inputs.method)), fullMargin());
 
-        EditText brewTime = input("冲煮时间", LocalTime.now().format(BREW_TIME_FORMAT));
+        EditText brewTime = timePickerInput(isBlank(brewDraft.brewTime) ? LocalTime.now().format(BREW_TIME_FORMAT) : brewDraft.brewTime);
         content.addView(formSection("记录时间", labeled("时间", brewTime)), fullMargin());
 
         TextView ratio = compactRatioField(dose, water);
         content.addView(formSection("粉水", twoColumns(labeled("粉量", withSuffix(dose, "g")), labeled("水量", withSuffix(water, "ml"))), ratio), fullMargin());
 
+        EditText grinder = grinderPickerInput(inputs.grinder, selected -> {
+            inputs.grinder = selected;
+            inputs.grind = formatGrind(inputs.grinder, inputs.grindDial);
+            brewDraft.grinder = selected;
+            brewDraft.grind = inputs.grind;
+        });
+        EditText grindDial = grindDialPickerInput(inputs.grindDial, selected -> {
+            inputs.grindDial = selected;
+            inputs.grind = formatGrind(inputs.grinder, inputs.grindDial);
+            brewDraft.grindDial = selected;
+            brewDraft.grind = inputs.grind;
+        });
         content.addView(formSection("研磨与水温",
-                chipGroup("grind", new String[]{"细", "中细", "中", "粗"}, inputs, true),
+                twoColumns(labeled("磨豆机", grinder), labeled("研磨刻度", grindDial)),
                 twoColumns(labeled("水温", withSuffix(temp, "°C")), labeled("萃取时间", withSuffix(time, "分:秒")))), fullMargin());
 
-        content.addView(ratingSection(inputs), fullMargin());
+        content.addView(ratingSection(inputs, () -> brewDraft.score = inputs.score), fullMargin());
 
-        EditText note = input("还有什么想记的", "");
-        ImageUploadField brewImages = imageUploadField("");
+        EditText note = input("还有什么想记的", brewDraft.note);
+        ImageUploadField brewImages = imageUploadField(joinImages(brewDraft.images));
+        brewImageField = brewImages;
         content.addView(formSection("风味笔记",
-                chipGroup("notes", new String[]{"甜感清楚", "尾段干净", "明亮酸", "醇厚", "偏苦", "偏酸"}, inputs, false),
+                chipGroup("notes", new String[]{"甜感清楚", "尾段干净", "明亮酸", "醇厚", "偏苦", "偏酸"}, inputs, false,
+                        () -> brewDraft.noteTags = new ArrayList<>(inputs.noteTags)),
                 labeled("补充", note), labeled("冲煮图片", brewImages.box)), fullMargin());
+
+        Runnable syncDraft = () -> syncBrewDraft(inputs, dose, water, temp, time, brewTime, note, brewImages);
+        dose.addTextChangedListener(simpleWatcher(syncDraft));
+        water.addTextChangedListener(simpleWatcher(syncDraft));
+        temp.addTextChangedListener(simpleWatcher(syncDraft));
+        time.addTextChangedListener(simpleWatcher(syncDraft));
+        brewTime.addTextChangedListener(simpleWatcher(syncDraft));
+        note.addTextChangedListener(simpleWatcher(syncDraft));
 
         TextView consume = text("", 13, MUTED, true);
         consume.setGravity(Gravity.CENTER);
@@ -634,7 +773,9 @@ public class MainActivity extends Activity {
         save.setOnClickListener(v -> {
             String finalNote = brewNote(inputs.noteTags, note.getText().toString());
             db.addBrew(currentPick.id, LocalDate.now().toString(), brewTime.getText().toString(), inputs.method, num(dose, 15), num(water, 240),
-                    inputs.grind, (int) num(temp, 92), time.getText().toString(), inputs.score / 10.0, finalNote, joinImages(brewImages.images));
+                    inputs.grind, (int) num(temp, 92), time.getText().toString(), inputs.score, finalNote, joinImages(brewImages.images));
+            brewDraft = new BrewDraft();
+            brewImageField = null;
             Toast.makeText(this, "已记录并扣减库存", Toast.LENGTH_SHORT).show();
             render();
         });
@@ -682,7 +823,7 @@ public class MainActivity extends Activity {
             for (int index = 0; index < batches.size(); index++) {
                 Bean bean = batches.get(index);
                 String batchName = group.name + (batches.size() > 1 ? " · " + bean.roastDate + " 批次" : "");
-                LocalDate ready = date(bean.roastDate).plusDays(7);
+                LocalDate ready = date(bean.roastDate).plusDays(bean.restDays);
                 long readyDays = ChronoUnit.DAYS.between(today, ready);
                 if (readyDays >= -7 && readyDays <= 30) {
                     String detail = readyDays < 0 ? "已养好 " + (-readyDays) + " 天" : readyDays == 0 ? "今天养豆完成" : "还有 " + readyDays + " 天养好豆";
@@ -966,15 +1107,17 @@ public class MainActivity extends Activity {
         grid.addView(statCard("总库存", fmt(s.totalRemaining) + "g"));
         grid.addView(statCard("已记录", s.brewCount + " 杯"));
         grid.addView(statCard("本月消耗", fmt(s.monthUsed) + "g"));
-        grid.addView(statCard("平均评分", s.avgScore > 0 ? String.format(Locale.CHINA, "%.1f", s.avgScore) : "-"));
+        grid.addView(statCard("平均评分", s.avgScore > 0
+                ? String.format(Locale.CHINA, "%.1f · %s", s.avgScore, ratingLabel((int) Math.round(s.avgScore))) : "-"));
         content.addView(grid, fullMargin());
 
         content.addView(columnChartCard("近 7 天消耗", "横轴为日期，纵轴为消耗粉量", db.dailyConsumption(7), "g"), fullMargin());
+        content.addView(barChartCard("剩余豆子克重排行", "按豆子汇总当前库存，从高到低展示前 5 款", db.remainingBeanRank(), "g"), fullMargin());
         content.addView(columnChartCard("冲煮时段", "横轴为时间段，纵轴为冲煮杯数", db.hourCounts(), "杯"), fullMargin());
         content.addView(columnChartCard("月度购入开销", "横轴为月份，纵轴为购入开销", db.monthlyPurchaseSpend(), "元"), fullMargin());
         content.addView(distributionChartCard("冲煮方式", "不同器具的使用频次", db.methodCounts(), "杯"), fullMargin());
-        content.addView(distributionChartCard("烘焙度分布", "按当前豆子库存批次统计", db.roastLevelCounts(), "款"), fullMargin());
-        content.addView(distributionChartCard("豆种分布", "按当前豆子库存批次统计", db.beanTypeCounts(), "款"), fullMargin());
+        content.addView(distributionChartCard("烘焙度分布", "同一豆子的多个批次仅计一次", db.roastLevelCounts(), "款"), fullMargin());
+        content.addView(distributionChartCard("豆种分布", "同一豆子的多个批次仅计一次", db.beanTypeCounts(), "款"), fullMargin());
         content.addView(distributionChartCard("克重价分布", "按每克购入价统计", db.priceBuckets(), "款"), fullMargin());
         content.addView(regionMapCard(db.originCounts()), fullMargin());
         content.addView(barChartCard("评分分布", "这段时间的满意度集中在哪", db.scoreBuckets(), "杯"), fullMargin());
@@ -1014,6 +1157,75 @@ public class MainActivity extends Activity {
         for (String alert : alerts) {
             content.addView(alertCard(alert), fullMargin());
         }
+    }
+
+    private void renderPhotos() {
+        pageTitle("冲煮册", "冲煮图片按记录时间倒序排列");
+        List<Brew> brews = db.brewsWithImages();
+        if (brews.isEmpty()) {
+            TextView empty = text("还没有冲煮图片", 14, MUTED, true);
+            empty.setGravity(Gravity.CENTER);
+            empty.setPadding(dp(16), dp(32), dp(16), dp(32));
+            empty.setBackground(round(PANEL, dp(14), LINE));
+            content.addView(empty, fullMargin());
+            return;
+        }
+
+        GridLayout grid = new GridLayout(this);
+        // Keep the gallery dense like the iOS photo library: square thumbnails,
+        // three per row and no separators between neighbouring photos.
+        grid.setColumnCount(3);
+        int cell = (getResources().getDisplayMetrics().widthPixels - dp(32)) / 3;
+        for (Brew brew : brews) {
+            for (String uri : imageList(brew.imageUris)) {
+                GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
+                lp.width = cell;
+                lp.height = cell;
+                lp.setMargins(0, 0, 0, 0);
+                grid.addView(brewPhotoCard(brew, uri), lp);
+            }
+        }
+        LinearLayout.LayoutParams gridLp = new LinearLayout.LayoutParams(-1, -2);
+        gridLp.setMargins(0, dp(2), 0, dp(8));
+        content.addView(grid, gridLp);
+    }
+
+    private View brewPhotoCard(Brew brew, String uri) {
+        FrameLayout card = new FrameLayout(this);
+        // Square, edge-to-edge images are intentional here; the overlay keeps
+        // the bean name readable without turning each image into a card.
+        card.setBackgroundColor(Color.TRANSPARENT);
+        ImageView image = new ImageView(this);
+        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        setCachedImage(image, uri, dp(260));
+        card.addView(image, new FrameLayout.LayoutParams(-1, -1));
+
+        View shade = new View(this);
+        shade.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{Color.TRANSPARENT, Color.argb(180, 20, 13, 10)}));
+        card.addView(shade, new FrameLayout.LayoutParams(-1, -1));
+
+        TextView method = text(brew.method, 11, Color.WHITE, true);
+        method.setMaxLines(1);
+        method.setPadding(dp(8), dp(4), dp(8), dp(4));
+        method.setBackground(round(Color.argb(164, 57, 93, 69), dp(10), Color.TRANSPARENT));
+        FrameLayout.LayoutParams methodLp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
+        methodLp.setMargins(dp(7), dp(7), 0, 0);
+        card.addView(method, methodLp);
+
+        TextView name = text(brew.beanName, 12, Color.WHITE, true);
+        name.setMaxLines(2);
+        // Let short bean names hug their content, while capping longer names so
+        // they still fit inside a three-column photo tile.
+        name.setMaxWidth(dp(112));
+        name.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        name.setPadding(dp(8), dp(4), dp(8), dp(4));
+        name.setBackground(round(Color.argb(104, 20, 13, 10), dp(10), Color.TRANSPARENT));
+        FrameLayout.LayoutParams nameLp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.END);
+        nameLp.setMargins(0, 0, dp(7), dp(7));
+        card.addView(name, nameLp);
+        card.setOnClickListener(v -> showImagePreview(uri));
+        return card;
     }
 
     private View brewRow(Brew brew) {
@@ -1132,6 +1344,13 @@ public class MainActivity extends Activity {
         scoreLine.setGravity(Gravity.CENTER_VERTICAL);
         scoreLine.addView(text(title, 15, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
         scoreLine.addView(statusBadge(String.format(Locale.CHINA, "%.1f", brew.score), GREEN_SOFT, GREEN_DARK));
+        TextView remove = iconButton("×", ROSE, Color.argb(68, 178, 73, 83), Color.TRANSPARENT);
+        remove.setTextSize(16);
+        remove.setContentDescription("删除这条冲煮记录");
+        remove.setOnClickListener(v -> confirmDeleteBrew(brew));
+        LinearLayout.LayoutParams removeLp = new LinearLayout.LayoutParams(dp(28), dp(28));
+        removeLp.setMargins(dp(6), 0, 0, 0);
+        scoreLine.addView(remove, removeLp);
         copy.addView(scoreLine);
         TextView detailView = text(detail, 12, MUTED, false);
         detailView.setPadding(0, dp(3), 0, 0);
@@ -1158,9 +1377,10 @@ public class MainActivity extends Activity {
     private String brewDayLabel(String raw) {
         LocalDate day = date(raw);
         LocalDate today = LocalDate.now();
-        if (day.equals(today)) return "今天 · " + raw;
-        if (day.equals(today.minusDays(1))) return "昨天 · " + raw;
-        return String.format(Locale.CHINA, "%02d月%02d日 · %s", day.getMonthValue(), day.getDayOfMonth(), raw);
+        if (day.equals(today)) return "今天";
+        if (day.equals(today.minusDays(1))) return "昨天";
+        if (day.getYear() == today.getYear()) return String.format(Locale.CHINA, "%d月%d日", day.getMonthValue(), day.getDayOfMonth());
+        return String.format(Locale.CHINA, "%d年%d月%d日", day.getYear(), day.getMonthValue(), day.getDayOfMonth());
     }
 
     private View brewTimelineRow(Brew brew, boolean showBeanName, boolean last) {
@@ -1180,7 +1400,14 @@ public class MainActivity extends Activity {
     private void showEditBrewTimeDialog(Brew brew) {
         LinearLayout form = form();
         EditText date = input("冲煮日期 yyyy-MM-dd", cleanText(brew.date, LocalDate.now().toString()));
-        EditText brewTime = input("冲煮时间 HH:mm", cleanText(brew.brewTime, LocalTime.now().format(BREW_TIME_FORMAT)));
+        EditText brewTime = timePickerInput(cleanText(brew.brewTime, LocalTime.now().format(BREW_TIME_FORMAT)));
+        final String[] methods = {"手冲", "意式", "爱乐压", "冷萃"};
+        TextView method = choiceField(cleanText(brew.method, "手冲"));
+        method.setOnClickListener(v -> new AlertDialog.Builder(this)
+                .setTitle("选择冲煮方式")
+                .setItems(methods, (d, which) -> method.setText(methods[which] + "  ▾"))
+                .show());
+        EditText score = numberInput("评分", String.format(Locale.CHINA, "%.1f", brew.score));
         List<Bean> choices = db.availableBatches();
         Bean current = db.beanById(brew.beanId);
         final Bean[] picked = {current};
@@ -1197,7 +1424,10 @@ public class MainActivity extends Activity {
                 formSection("所用豆子", labeled("豆子", beanPick)),
                 formSection("记录时间",
                         labeled("日期", date),
-                        labeled("时间", brewTime)));
+                        labeled("时间", brewTime)),
+                formSection("冲煮方式与评价",
+                        labeled("方式", method),
+                        labeled("评分（0-6）", score)));
 
         new AlertDialog.Builder(this)
                 .setTitle("修改冲煮记录")
@@ -1208,9 +1438,24 @@ public class MainActivity extends Activity {
                         Toast.makeText(this, "新选择的豆子余量不足 " + fmt(brew.dose) + "g", Toast.LENGTH_SHORT).show();
                         return;
                     }
-                    db.updateBrewDateTime(brew.id, date.getText().toString(), brewTime.getText().toString());
+                    double updatedScore = Math.max(0, Math.min(6, num(score, brew.score)));
+                    String updatedMethod = method.getText().toString().replace("▾", "").trim();
+                    db.updateBrewDetails(brew.id, date.getText().toString(), brewTime.getText().toString(), updatedMethod, updatedScore);
                     db.moveBrewToBean(brew.id, brew.beanId, picked[0].id, brew.dose);
-                    Toast.makeText(this, "冲煮记录与库存已更新", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(this, "冲煮记录已更新", Toast.LENGTH_SHORT).show();
+                    render();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void confirmDeleteBrew(Brew brew) {
+        new AlertDialog.Builder(this)
+                .setTitle("删除冲煮记录")
+                .setMessage("删除后会将 " + fmt(brew.dose) + "g 返还至所用豆子的库存。")
+                .setPositiveButton("删除", (d, w) -> {
+                    db.deleteBrewAndRestoreStock(brew.id, brew.beanId, brew.dose);
+                    Toast.makeText(this, "已删除记录并返还库存", Toast.LENGTH_SHORT).show();
                     render();
                 })
                 .setNegativeButton("取消", null)
@@ -1304,6 +1549,10 @@ public class MainActivity extends Activity {
     }
 
     private void openBrew(Bean bean) {
+        if (!"brew".equals(tab)) {
+            brewDraft = new BrewDraft();
+            brewImageField = null;
+        }
         if (bean != null) brewBeanId = bean.id;
         tab = "brew";
         render();
@@ -1339,6 +1588,7 @@ public class MainActivity extends Activity {
     }
 
     private void showBrewBeanPicker() {
+        if (brewImageField != null) brewDraft.images = new ArrayList<>(brewImageField.images);
         List<Bean> batches = db.availableBatches();
         if (batches.isEmpty()) {
             Toast.makeText(this, "没有可用库存", Toast.LENGTH_SHORT).show();
@@ -1355,7 +1605,7 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    private LinearLayout segmented(String field, String[] options, BrewInputs inputs, Runnable onEspressoSelected) {
+    private LinearLayout segmented(String field, String[] options, BrewInputs inputs, Runnable onEspressoSelected, Runnable onChanged) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setPadding(dp(4), dp(4), dp(4), dp(4));
@@ -1369,6 +1619,7 @@ public class MainActivity extends Activity {
             chip.setOnClickListener(v -> {
                 inputs.method = option;
                 if ("意式".equals(option) && onEspressoSelected != null) onEspressoSelected.run();
+                if (onChanged != null) onChanged.run();
                 for (TextView item : views) {
                     boolean active = item.getText().toString().equals(inputs.method);
                     item.setTextColor(active ? GREEN_DARK : MUTED);
@@ -1382,7 +1633,7 @@ public class MainActivity extends Activity {
         return row;
     }
 
-    private LinearLayout chipGroup(String field, String[] options, BrewInputs inputs, boolean single) {
+    private LinearLayout chipGroup(String field, String[] options, BrewInputs inputs, boolean single, Runnable onChanged) {
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(single ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
         wrap.setPadding(0, dp(4), 0, dp(8));
@@ -1406,6 +1657,7 @@ public class MainActivity extends Activity {
                     else inputs.noteTags.add(option);
                     setChoiceChipActive(chip, inputs.noteTags.contains(option));
                 }
+                if (onChanged != null) onChanged.run();
             });
             views.add(chip);
             LinearLayout.LayoutParams lp = single ? new LinearLayout.LayoutParams(-2, dp(42)) : new LinearLayout.LayoutParams(0, dp(42), 1);
@@ -1430,7 +1682,7 @@ public class MainActivity extends Activity {
         chip.setBackground(round(active ? GREEN_SOFT : Color.TRANSPARENT, dp(20), active ? Color.rgb(118, 181, 165) : LINE));
     }
 
-    private LinearLayout ratingSection(BrewInputs inputs) {
+    private LinearLayout ratingSection(BrewInputs inputs, Runnable onChanged) {
         LinearLayout section = formSection("这杯怎么样");
         LinearLayout top = new LinearLayout(this);
         top.setOrientation(LinearLayout.HORIZONTAL);
@@ -1439,23 +1691,28 @@ public class MainActivity extends Activity {
         top.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
         TextView score = text("", 32, INK, true);
         top.addView(score);
-        TextView max = text(" / 5", 15, MUTED, true);
+        TextView max = text(" / 6", 15, MUTED, true);
         top.addView(max);
         section.addView(top);
+
+        TextView scale = text("0 无法接受 · 1 可以接受 · 2 普通 · 3 好 · 4 很好 · 5 优秀 · 6 格外出众", 11, MUTED, false);
+        scale.setPadding(0, dp(2), 0, dp(7));
+        section.addView(scale);
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
         TextView minus = flatCircleButton("-", MUTED, CREAM, LINE);
         SeekBar bar = new SeekBar(this);
-        bar.setMax(50);
+        bar.setMax(6);
         bar.setProgress(inputs.score);
         TextView plus = flatCircleButton("+", MUTED, CREAM, LINE);
-        Runnable refresh = () -> score.setText(String.format(Locale.CHINA, "%.1f", inputs.score / 10.0));
+        Runnable refresh = () -> score.setText(inputs.score + " · " + ratingLabel(inputs.score));
         bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 inputs.score = Math.max(0, progress);
                 refresh.run();
+                if (onChanged != null) onChanged.run();
             }
             @Override public void onStartTrackingTouch(SeekBar seekBar) {}
             @Override public void onStopTrackingTouch(SeekBar seekBar) {}
@@ -1464,11 +1721,13 @@ public class MainActivity extends Activity {
             inputs.score = Math.max(0, inputs.score - 1);
             bar.setProgress(inputs.score);
             refresh.run();
+            if (onChanged != null) onChanged.run();
         });
         plus.setOnClickListener(v -> {
-            inputs.score = Math.min(50, inputs.score + 1);
+            inputs.score = Math.min(6, inputs.score + 1);
             bar.setProgress(inputs.score);
             refresh.run();
+            if (onChanged != null) onChanged.run();
         });
         refresh.run();
 
@@ -1479,6 +1738,18 @@ public class MainActivity extends Activity {
         row.addView(plus, new LinearLayout.LayoutParams(dp(40), dp(40)));
         section.addView(row);
         return section;
+    }
+
+    private String ratingLabel(int score) {
+        switch (Math.max(0, Math.min(6, score))) {
+            case 0: return "无法接受";
+            case 1: return "可以接受";
+            case 2: return "普通";
+            case 3: return "好";
+            case 4: return "很好";
+            case 5: return "优秀";
+            default: return "格外出众";
+        }
     }
 
     private LinearLayout twoColumns(View left, View right) {
@@ -1570,6 +1841,13 @@ public class MainActivity extends Activity {
         top.setGravity(Gravity.CENTER_VERTICAL);
         top.addView(text("库存消耗量", 17, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
         top.addView(statusBadge("总量按库存差", CREAM, MUTED));
+        TextView add = circleButton("+", Color.WHITE, GREEN, GREEN_DARK);
+        add.setTextSize(22);
+        add.setContentDescription("添加豆子或新增批次");
+        add.setOnClickListener(v -> showStockAddChoice());
+        LinearLayout.LayoutParams addLp = new LinearLayout.LayoutParams(dp(34), dp(34));
+        addLp.setMargins(dp(8), 0, 0, 0);
+        top.addView(add, addLp);
         box.addView(top);
 
         GridLayout grid = new GridLayout(this);
@@ -1600,6 +1878,32 @@ public class MainActivity extends Activity {
         return card;
     }
 
+    private void showStockAddChoice() {
+        new AlertDialog.Builder(this)
+                .setTitle("新增库存")
+                .setItems(new String[]{"给现有豆子新增批次", "添加新的豆子"}, (dialog, which) -> {
+                    if (which == 1) {
+                        showAddBeanDialog();
+                        return;
+                    }
+                    List<Bean> beans = db.beanGroups();
+                    if (beans.isEmpty()) {
+                        showAddBeanDialog();
+                        return;
+                    }
+                    String[] choices = new String[beans.size()];
+                    for (int i = 0; i < beans.size(); i++) {
+                        Bean bean = beans.get(i);
+                        choices[i] = bean.name + " · " + bean.roaster;
+                    }
+                    new AlertDialog.Builder(this)
+                            .setTitle("选择已有豆子")
+                            .setItems(choices, (d, index) -> showNewBatchDialog(beans.get(index)))
+                            .show();
+                })
+                .show();
+    }
+
     private View barChartCard(String title, String sub, List<ChartItem> items, String unit) {
         LinearLayout box = card();
         box.setPadding(dp(14), dp(14), dp(14), dp(14));
@@ -1626,10 +1930,6 @@ public class MainActivity extends Activity {
     private View pieChartCard(String title, String sub, List<ChartItem> items, String unit) {
         LinearLayout box = card();
         box.setPadding(dp(14), dp(14), dp(14), dp(14));
-        box.addView(text(title, 17, INK, true));
-        TextView subtitle = text(sub, 12, MUTED, false);
-        subtitle.setPadding(0, dp(2), 0, dp(8));
-        box.addView(subtitle);
         double total = 0;
         for (ChartItem item : items) total += item.value;
         if (items.isEmpty() || total <= 0) {
@@ -1638,21 +1938,25 @@ public class MainActivity extends Activity {
         }
         LinearLayout body = new LinearLayout(this);
         body.setGravity(Gravity.CENTER_VERTICAL);
-        body.addView(new PieChartView(this, items), new LinearLayout.LayoutParams(dp(150), dp(150)));
-        LinearLayout legend = new LinearLayout(this);
-        legend.setOrientation(LinearLayout.VERTICAL);
-        legend.setGravity(Gravity.CENTER_VERTICAL);
-        legend.setPadding(dp(10), 0, 0, 0);
+        LinearLayout copy = new LinearLayout(this);
+        copy.setOrientation(LinearLayout.VERTICAL);
+        copy.addView(text(title, 18, INK, true));
+        TextView subtitle = text(sub, 13, MUTED, false);
+        subtitle.setPadding(0, dp(2), 0, dp(10));
+        copy.addView(subtitle);
         int[] colors = pieColors();
         for (int i = 0; i < items.size(); i++) {
             ChartItem item = items.get(i);
-            TextView entry = text("●  " + item.label + "  " + formatChartValue(item.value) + unit, 12, colors[i % colors.length], true);
+            TextView entry = text("●  " + item.label + "  " + formatChartValue(item.value) + unit, 14, colors[i % colors.length], true);
             entry.setMaxLines(2);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-            lp.setMargins(0, i == 0 ? 0 : dp(8), 0, 0);
-            legend.addView(entry, lp);
+            lp.setMargins(0, i == 0 ? 0 : dp(7), 0, 0);
+            copy.addView(entry, lp);
         }
-        body.addView(legend, new LinearLayout.LayoutParams(0, -2, 1));
+        body.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams pieLp = new LinearLayout.LayoutParams(dp(156), dp(156));
+        pieLp.setMargins(dp(6), 0, 0, 0);
+        body.addView(new PieChartView(this, items), pieLp);
         box.addView(body);
         return box;
     }
@@ -1674,11 +1978,18 @@ public class MainActivity extends Activity {
         LinearLayout track = new LinearLayout(this);
         track.setOrientation(LinearLayout.HORIZONTAL);
         track.setGravity(Gravity.CENTER_VERTICAL);
-        track.setBackground(round(CREAM, dp(10), Color.TRANSPARENT));
-        View fill = new View(this);
-        fill.setBackground(round(GREEN_SOFT, dp(10), Color.TRANSPARENT));
-        int fillWidth = Math.max(dp(12), (int) ((getResources().getDisplayMetrics().widthPixels - dp(252)) * (value / max)));
-        track.addView(fill, new LinearLayout.LayoutParams(fillWidth, dp(12)));
+        boolean full = max > 0 && value >= max - 0.0001;
+        if (full) {
+            // A full bar is painted as one rounded track. This avoids the fill view
+            // being clipped square at the right edge by its parent container.
+            track.setBackground(round(GREEN_SOFT, dp(10), Color.TRANSPARENT));
+        } else {
+            track.setBackground(round(CREAM, dp(10), Color.TRANSPARENT));
+            View fill = new View(this);
+            fill.setBackground(round(GREEN_SOFT, dp(10), Color.TRANSPARENT));
+            int fillWidth = Math.max(dp(12), (int) ((getResources().getDisplayMetrics().widthPixels - dp(252)) * (value / max)));
+            track.addView(fill, new LinearLayout.LayoutParams(fillWidth, dp(12)));
+        }
         row.addView(track, new LinearLayout.LayoutParams(0, dp(14), 1));
 
         TextView valueView = text(formatChartValue(value) + unit, 12, INK, true);
@@ -1731,7 +2042,7 @@ public class MainActivity extends Activity {
         LinearLayout box = card();
         box.setPadding(dp(14), dp(14), dp(14), dp(14));
         box.addView(text("产区分布", 17, INK, true));
-        TextView subtitle = text("地图上的圆点代表当前库存豆子的主要产区，圆点越大数量越多", 12, MUTED, false);
+        TextView subtitle = text("按豆子汇总；地图圆点代表主要产区，圆点越大数量越多", 12, MUTED, false);
         subtitle.setPadding(0, dp(2), 0, dp(10));
         box.addView(subtitle);
         if (items.isEmpty()) {
@@ -2002,27 +2313,28 @@ public class MainActivity extends Activity {
     private void showBeanDialog(Bean bean) {
         LinearLayout form = form();
         boolean editing = bean != null;
-        EditText name = input("豆子名称", editing ? bean.name : "花蝴蝶");
-        EditText roaster = input("烘焙商", editing ? bean.roaster : "Fisher Coffee");
+        EditText name = input("豆子名称", editing ? bean.name : "");
+        EditText roaster = historyChoiceInput("烘焙商", editing ? bean.roaster : "", "roaster", new String[0]);
         final String[] selectedBeanTypes = {editing ? bean.beanType : DEFAULT_BEAN_TYPE};
         final String[] productKind = {editing ? productTypeName(bean) : "单品"};
         TextView beanType = choiceField(beanTypesChoiceLabel(selectedBeanTypes[0], supportsMultipleBeanTypes(productKind[0])));
         TextView productType = choiceField(productKind[0]);
         productType.setOnClickListener(v -> showProductTypeDialog(productType, productKind, selectedBeanTypes, beanType));
         beanType.setOnClickListener(v -> { if (supportsMultipleBeanTypes(productKind[0])) showBlendBeanTypeDialog(beanType, selectedBeanTypes); else showBeanTypeDialog(beanType, selectedBeanTypes); });
-        EditText origin = input("产地", editing ? bean.origin : "埃塞俄比亚");
-        EditText process = input("处理法", editing ? bean.process : "日晒");
-        EditText roast = input("烘焙度", editing ? bean.roastLevel : "浅烘");
-        EditText tags = input("风味标签", editing ? bean.flavorTags : "莓果,花香,柑橘");
+        EditText origin = multiHistoryChoiceInput("产地", editing ? bean.origin : "", "origin", ORIGIN_OPTIONS);
+        EditText process = historyChoiceInput("处理法", editing ? bean.process : "", "process", PROCESS_OPTIONS);
+        EditText roast = historyChoiceInput("烘焙度", editing ? bean.roastLevel : "", "roast_level", ROAST_OPTIONS);
+        EditText tags = multiHistoryChoiceInput("风味标签", editing ? bean.flavorTags : "", "flavor_tags", FLAVOR_OPTIONS);
         ImageUploadField packageImages = imageUploadField(editing ? bean.packageImageUris : "");
         ImageUploadField beanImages = imageUploadField(editing ? bean.beanImageUris : "");
         EditText total = numberInput("规格克数", editing ? fmt(bean.totalGram) : "200");
         EditText remaining = numberInput("剩余克数", editing ? fmt(bean.remainingGram) : "200");
         EditText price = numberInput("购买价", editing ? fmt(bean.price) : "88");
         TextView gramPrice = gramPriceField(total, price);
-        EditText purchaseDate = input("购买日期 yyyy-MM-dd", editing ? bean.purchaseDate : LocalDate.now().toString());
-        EditText roastDate = input("烘焙日期 yyyy-MM-dd", editing ? bean.roastDate : LocalDate.now().minusDays(7).toString());
-        EditText openDate = input("开封日期 yyyy-MM-dd（留空=未拆封）", editing ? bean.openDate : "");
+        EditText purchaseDate = datePickerInput("购买日期", editing ? bean.purchaseDate : LocalDate.now().toString(), false);
+        EditText roastDate = datePickerInput("烘焙日期", editing ? bean.roastDate : LocalDate.now().minusDays(7).toString(), false);
+        EditText openDate = datePickerInput("开封日期（留空=未拆封）", editing ? bean.openDate : "", true);
+        EditText restDays = numberInput("养豆天数", String.valueOf(editing ? bean.restDays : 7));
         EditText bestBeforeDate = bestBeforeInput(roastDate, editing ? bean.bestBeforeDate : "");
         addAll(form,
                 formSection("基本信息",
@@ -2047,6 +2359,7 @@ public class MainActivity extends Activity {
                         labeled("购买日期", purchaseDate),
                         labeled("烘焙日期", roastDate),
                         labeled("开封日期", openDate),
+                        labeled("养豆天数", restDays),
                         labeled("赏味期限", bestBeforeDate)));
 
         new AlertDialog.Builder(this)
@@ -2074,6 +2387,7 @@ public class MainActivity extends Activity {
                     updated.purchaseDate = purchaseDate.getText().toString();
                     updated.roastDate = roastDate.getText().toString();
                     updated.openDate = openDate.getText().toString();
+                    updated.restDays = Math.max(0, (int) num(restDays, 7));
                     updated.bestBeforeDate = bestBeforeDate.getText().toString();
                     if (editing) {
                         db.updateBean(updated);
@@ -2091,17 +2405,17 @@ public class MainActivity extends Activity {
     private void showBeanBaseDialog(Bean bean) {
         LinearLayout form = form();
         EditText name = input("豆子名称", bean.name);
-        EditText roaster = input("烘焙商", bean.roaster);
+        EditText roaster = historyChoiceInput("烘焙商", bean.roaster, "roaster", new String[0]);
         final String[] selectedBeanTypes = {bean.beanType};
         final String[] productKind = {productTypeName(bean)};
         TextView beanType = choiceField(beanTypesChoiceLabel(selectedBeanTypes[0], supportsMultipleBeanTypes(productKind[0])));
         TextView productType = choiceField(productKind[0]);
         productType.setOnClickListener(v -> showProductTypeDialog(productType, productKind, selectedBeanTypes, beanType));
         beanType.setOnClickListener(v -> { if (supportsMultipleBeanTypes(productKind[0])) showBlendBeanTypeDialog(beanType, selectedBeanTypes); else showBeanTypeDialog(beanType, selectedBeanTypes); });
-        EditText origin = input("产地", bean.origin);
-        EditText process = input("处理法", bean.process);
-        EditText roast = input("烘焙度", bean.roastLevel);
-        EditText tags = input("风味标签", bean.flavorTags);
+        EditText origin = multiHistoryChoiceInput("产地", bean.origin, "origin", ORIGIN_OPTIONS);
+        EditText process = historyChoiceInput("处理法", bean.process, "process", PROCESS_OPTIONS);
+        EditText roast = historyChoiceInput("烘焙度", bean.roastLevel, "roast_level", ROAST_OPTIONS);
+        EditText tags = multiHistoryChoiceInput("风味标签", bean.flavorTags, "flavor_tags", FLAVOR_OPTIONS);
         ImageUploadField packageImages = imageUploadField(bean.packageImageUris);
         ImageUploadField beanImages = imageUploadField(bean.beanImageUris);
         addAll(form,
@@ -2127,9 +2441,10 @@ public class MainActivity extends Activity {
         List<EditText> roastDates = new ArrayList<>();
         List<EditText> openDates = new ArrayList<>();
         List<EditText> bestBeforeDates = new ArrayList<>();
+        List<EditText> restDaysList = new ArrayList<>();
         for (int i = 0; i < batches.size(); i++) {
             Bean batch = batches.get(i);
-            LinearLayout batchBox = batchEditor(i + 1, batch, totals, remainings, prices, purchaseDates, roastDates, openDates, bestBeforeDates);
+            LinearLayout batchBox = batchEditor(i + 1, batch, totals, remainings, prices, purchaseDates, roastDates, openDates, bestBeforeDates, restDaysList);
             form.addView(batchBox, new LinearLayout.LayoutParams(-1, -2));
         }
 
@@ -2159,6 +2474,7 @@ public class MainActivity extends Activity {
                         updated.purchaseDate = purchaseDates.get(i).getText().toString();
                         updated.roastDate = roastDates.get(i).getText().toString();
                         updated.openDate = openDates.get(i).getText().toString();
+                        updated.restDays = Math.max(0, (int) num(restDaysList.get(i), batches.get(i).restDays));
                         updated.bestBeforeDate = bestBeforeDates.get(i).getText().toString();
                         db.updateBean(updated);
                     }
@@ -2172,7 +2488,7 @@ public class MainActivity extends Activity {
     private LinearLayout batchEditor(int index, Bean batch, List<EditText> totals, List<EditText> remainings,
                                     List<EditText> prices, List<EditText> purchaseDates,
                                     List<EditText> roastDates, List<EditText> openDates,
-                                    List<EditText> bestBeforeDates) {
+                                    List<EditText> bestBeforeDates, List<EditText> restDaysList) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(0, dp(12), 0, dp(2));
@@ -2181,9 +2497,10 @@ public class MainActivity extends Activity {
         EditText remaining = numberInput("剩余克数", fmt(batch.remainingGram));
         EditText price = numberInput("购买价", fmt(batch.price));
         TextView gramPrice = gramPriceField(total, price);
-        EditText purchaseDate = input("购买日期 yyyy-MM-dd", batch.purchaseDate);
-        EditText roastDate = input("烘焙日期 yyyy-MM-dd", batch.roastDate);
-        EditText openDate = input("开封日期 yyyy-MM-dd（留空=未拆封）", batch.openDate);
+        EditText purchaseDate = datePickerInput("购买日期", batch.purchaseDate, false);
+        EditText roastDate = datePickerInput("烘焙日期", batch.roastDate, false);
+        EditText openDate = datePickerInput("开封日期（留空=未拆封）", batch.openDate, true);
+        EditText restDays = numberInput("养豆天数", String.valueOf(batch.restDays));
         EditText bestBeforeDate = bestBeforeInput(roastDate, batch.bestBeforeDate);
         box.addView(formSection("批次 " + index,
                 labeled("规格克数", total),
@@ -2193,6 +2510,7 @@ public class MainActivity extends Activity {
                 labeled("购买日期", purchaseDate),
                 labeled("烘焙日期", roastDate),
                 labeled("开封日期", openDate),
+                labeled("养豆天数", restDays),
                 labeled("赏味期限", bestBeforeDate)));
 
         totals.add(total);
@@ -2202,6 +2520,7 @@ public class MainActivity extends Activity {
         roastDates.add(roastDate);
         openDates.add(openDate);
         bestBeforeDates.add(bestBeforeDate);
+        restDaysList.add(restDays);
         return box;
     }
 
@@ -2211,9 +2530,10 @@ public class MainActivity extends Activity {
         EditText remaining = numberInput("新批次入库克数", fmt(bean.totalGram));
         EditText price = numberInput("购买价", fmt(bean.price));
         TextView gramPrice = gramPriceField(total, price);
-        EditText purchaseDate = input("购买日期 yyyy-MM-dd", LocalDate.now().toString());
-        EditText roastDate = input("烘焙日期 yyyy-MM-dd", LocalDate.now().minusDays(7).toString());
-        EditText openDate = input("开封日期 yyyy-MM-dd（留空=未拆封）", "");
+        EditText purchaseDate = datePickerInput("购买日期", LocalDate.now().toString(), false);
+        EditText roastDate = datePickerInput("烘焙日期", LocalDate.now().minusDays(bean.restDays).toString(), false);
+        EditText openDate = datePickerInput("开封日期（留空=未拆封）", "", true);
+        EditText restDays = numberInput("养豆天数", String.valueOf(bean.restDays));
         EditText bestBeforeDate = bestBeforeInput(roastDate, "");
         addAll(form,
                 formSection("规格与库存",
@@ -2225,6 +2545,7 @@ public class MainActivity extends Activity {
                         labeled("购买日期", purchaseDate),
                         labeled("烘焙日期", roastDate),
                         labeled("开封日期", openDate),
+                        labeled("养豆天数", restDays),
                         labeled("赏味期限", bestBeforeDate)));
 
         new AlertDialog.Builder(this)
@@ -2239,6 +2560,7 @@ public class MainActivity extends Activity {
                     batch.purchaseDate = purchaseDate.getText().toString();
                     batch.roastDate = roastDate.getText().toString();
                     batch.openDate = openDate.getText().toString();
+                    batch.restDays = Math.max(0, (int) num(restDays, bean.restDays));
                     batch.bestBeforeDate = bestBeforeDate.getText().toString();
                     db.addBean(batch);
                     Toast.makeText(this, "新批次已入库", Toast.LENGTH_SHORT).show();
@@ -2286,9 +2608,9 @@ public class MainActivity extends Activity {
         EditText water = numberInput("水量 g", "240");
         EditText grind = input("研磨度", "中细");
         EditText temp = numberInput("水温", "92");
-        EditText brewTime = input("冲煮时间", LocalTime.now().format(BREW_TIME_FORMAT));
-        EditText time = input("萃取时间", "2:30");
-        EditText score = numberInput("评分", "4.2");
+        EditText brewTime = timePickerInput(LocalTime.now().format(BREW_TIME_FORMAT));
+        EditText time = durationPickerInput("2:30");
+        EditText score = numberInput("评分", "3");
         EditText note = input("备注", "甜感清楚，尾段干净");
         TextView ratio = gramRatioField(dose, water);
         addAll(form,
@@ -2458,9 +2780,8 @@ public class MainActivity extends Activity {
     private void pageTitle(String title, String sub) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(16), dp(16), dp(16), dp(14));
-        box.setBackground(round(Color.argb(68, 255, 255, 255), dp(16), LINE));
-        TextView t = text(title, 28, INK, true);
+        box.setPadding(0, dp(8), 0, dp(12));
+        TextView t = text(title, 30, INK, true);
         box.addView(t);
         TextView s = text(sub, 13, MUTED, false);
         s.setPadding(0, dp(4), 0, 0);
@@ -2471,6 +2792,12 @@ public class MainActivity extends Activity {
     private String shortBeanType(String raw) {
         String value = normalizeBeanTypes(raw);
         return value.replaceAll("\\s*/\\s*[A-Za-z][A-Za-z .'-]*", "").trim();
+    }
+
+    private String trimFilterText(String value) {
+        if (value == null) return "";
+        String compact = value.trim();
+        return compact.length() > 6 ? compact.substring(0, 5) + "…" : compact;
     }
 
     private boolean containsBeanType(Bean bean, String type) {
@@ -2639,10 +2966,262 @@ public class MainActivity extends Activity {
         return e;
     }
 
+    private EditText datePickerInput(String hint, String value, boolean allowEmpty) {
+        EditText e = input(hint, value);
+        e.setInputType(InputType.TYPE_NULL);
+        e.setFocusable(false);
+        e.setCursorVisible(false);
+        e.setCompoundDrawablesWithIntrinsicBounds(0, 0, android.R.drawable.ic_menu_my_calendar, 0);
+        e.setOnClickListener(v -> {
+            LocalDate initial = LocalDate.now();
+            try { if (!isBlank(e.getText().toString())) initial = LocalDate.parse(e.getText().toString().trim()); }
+            catch (Exception ignored) { }
+            DatePickerDialog picker = new DatePickerDialog(this, (view, year, month, day) ->
+                    e.setText(LocalDate.of(year, month + 1, day).toString()),
+                    initial.getYear(), initial.getMonthValue() - 1, initial.getDayOfMonth());
+            if (allowEmpty) picker.setButton(DatePickerDialog.BUTTON_NEUTRAL, "清空", (dialog, which) -> e.setText(""));
+            picker.show();
+        });
+        return e;
+    }
+
+    private EditText historyChoiceInput(String hint, String value, String column, String[] defaults) {
+        EditText e = input(hint, value);
+        e.setInputType(InputType.TYPE_NULL);
+        e.setFocusable(false);
+        e.setCursorVisible(false);
+        e.setCompoundDrawablesWithIntrinsicBounds(0, 0, android.R.drawable.arrow_down_float, 0);
+        e.setOnClickListener(v -> {
+            List<String> options = new ArrayList<>();
+            for (String item : defaults) if (!options.contains(item)) options.add(item);
+            for (String item : db.beanFieldValues(column)) if (!options.contains(item)) options.add(item);
+            options.add("＋ 新增…");
+            new AlertDialog.Builder(this)
+                    .setTitle("选择" + hint)
+                    .setItems(options.toArray(new String[0]), (dialog, which) -> {
+                        if (which == options.size() - 1) {
+                            EditText custom = input("输入" + hint, "");
+                            new AlertDialog.Builder(this)
+                                    .setTitle("新增" + hint)
+                                    .setView(custom)
+                                    .setPositiveButton("确定", (d, w) -> e.setText(custom.getText().toString().trim()))
+                                    .setNegativeButton("取消", null)
+                                    .show();
+                        } else e.setText(options.get(which));
+                    })
+                    .show();
+        });
+        return e;
+    }
+
+    private EditText multiHistoryChoiceInput(String hint, String value, String column, String[] defaults) {
+        EditText e = input(hint, value);
+        e.setInputType(InputType.TYPE_NULL);
+        e.setFocusable(false);
+        e.setCursorVisible(false);
+        e.setCompoundDrawablesWithIntrinsicBounds(0, 0, android.R.drawable.arrow_down_float, 0);
+        e.setOnClickListener(v -> {
+            List<String> options = new ArrayList<>();
+            for (String item : defaults) if (!options.contains(item)) options.add(item);
+            for (String item : db.beanMultiFieldValues(column)) if (!options.contains(item)) options.add(item);
+            if ("flavor_tags".equals(column)) Collections.sort(options, Collator.getInstance(Locale.CHINA));
+            List<String> selected = splitMultiValues(e.getText().toString());
+            boolean[] checked = new boolean[options.size()];
+            for (int i = 0; i < options.size(); i++) checked[i] = selected.contains(options.get(i));
+            new AlertDialog.Builder(this)
+                    .setTitle("多选" + hint)
+                    .setMultiChoiceItems(options.toArray(new String[0]), checked, (dialog, which, isChecked) -> checked[which] = isChecked)
+                    .setNeutralButton("新增自定义", (dialog, which) -> {
+                        EditText custom = input("多个项目请用逗号分隔", "");
+                        new AlertDialog.Builder(this)
+                                .setTitle("新增" + hint)
+                                .setView(custom)
+                                .setPositiveButton("加入", (d, w) -> {
+                                    List<String> values = selectedValues(options, checked);
+                                    for (String item : splitMultiValues(custom.getText().toString())) if (!values.contains(item)) values.add(item);
+                                    e.setText(joinMultiValues(values));
+                                })
+                                .setNegativeButton("取消", null)
+                                .show();
+                    })
+                    .setPositiveButton("确定", (dialog, which) -> e.setText(joinMultiValues(selectedValues(options, checked))))
+                    .setNegativeButton("取消", null)
+                    .show();
+        });
+        return e;
+    }
+
+    private List<String> selectedValues(List<String> options, boolean[] checked) {
+        List<String> values = new ArrayList<>();
+        for (int i = 0; i < options.size(); i++) if (checked[i]) values.add(options.get(i));
+        return values;
+    }
+
+    private List<String> splitMultiValues(String raw) {
+        List<String> values = new ArrayList<>();
+        if (isBlank(raw)) return values;
+        for (String item : raw.split("[,，、]+")) {
+            String cleaned = item.trim();
+            if (!isBlank(cleaned) && !values.contains(cleaned)) values.add(cleaned);
+        }
+        return values;
+    }
+
+    private String joinMultiValues(List<String> values) {
+        StringBuilder out = new StringBuilder();
+        for (String value : values) {
+            if (isBlank(value)) continue;
+            if (out.length() > 0) out.append(", ");
+            out.append(value.trim());
+        }
+        return out.toString();
+    }
+
     private EditText numberInput(String hint, String value) {
         EditText e = input(hint, value);
         e.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        e.setSelectAllOnFocus(true);
         return e;
+    }
+
+    private interface StringValueListener {
+        void onValue(String value);
+    }
+
+    private EditText grinderPickerInput(String value, StringValueListener onPicked) {
+        EditText e = input("选择磨豆机", isBlank(value) ? "选择磨豆机" : value);
+        e.setInputType(InputType.TYPE_NULL);
+        e.setFocusable(false);
+        e.setCursorVisible(false);
+        e.setCompoundDrawablesWithIntrinsicBounds(0, 0, android.R.drawable.arrow_down_float, 0);
+        e.setOnClickListener(v -> new AlertDialog.Builder(this)
+                .setTitle("选择磨豆机")
+                .setItems(GRINDER_OPTIONS, (dialog, which) -> {
+                    String selected = GRINDER_OPTIONS[which];
+                    e.setText(selected);
+                    if (onPicked != null) onPicked.onValue(selected);
+                })
+                .show());
+        return e;
+    }
+
+    private EditText grindDialPickerInput(String value, StringValueListener onPicked) {
+        EditText e = input("选择刻度", isBlank(value) ? "选择刻度" : value);
+        e.setInputType(InputType.TYPE_NULL);
+        e.setFocusable(false);
+        e.setCursorVisible(false);
+        e.setCompoundDrawablesWithIntrinsicBounds(0, 0, android.R.drawable.arrow_down_float, 0);
+        e.setOnClickListener(v -> {
+            NumberPicker picker = new NumberPicker(this);
+            picker.setMinValue(0);
+            picker.setMaxValue(80);
+            picker.setDisplayedValues(grindDialValues());
+            picker.setWrapSelectorWheel(false);
+            int selected = 36;
+            try { selected = Math.max(0, Math.min(80, (int) Math.round(Double.parseDouble(e.getText().toString()) * 2))); } catch (Exception ignored) { }
+            picker.setValue(selected);
+            new AlertDialog.Builder(this)
+                    .setTitle("选择研磨刻度")
+                    .setView(picker)
+                    .setPositiveButton("确定", (dialog, which) -> {
+                        String setting = String.format(Locale.CHINA, "%.1f", picker.getValue() / 2.0);
+                        e.setText(setting);
+                        if (onPicked != null) onPicked.onValue(setting);
+                    })
+                    .setNegativeButton("取消", null)
+                    .show();
+        });
+        return e;
+    }
+
+    private String[] grindDialValues() {
+        String[] values = new String[81];
+        for (int i = 0; i <= 80; i++) values[i] = String.format(Locale.CHINA, "%.1f", i / 2.0);
+        return values;
+    }
+
+    private String formatGrind(String grinder, String dial) {
+        boolean hasGrinder = !isBlank(grinder) && !"选择磨豆机".equals(grinder);
+        boolean hasDial = !isBlank(dial) && !"选择刻度".equals(dial);
+        if (hasGrinder && hasDial) return grinder + " · 刻度 " + dial;
+        if (hasGrinder) return grinder;
+        if (hasDial) return "刻度 " + dial;
+        return "未记录";
+    }
+
+    private EditText timePickerInput(String value) {
+        EditText e = input("冲煮时间", value);
+        e.setInputType(InputType.TYPE_NULL);
+        e.setFocusable(false);
+        e.setCursorVisible(false);
+        e.setCompoundDrawablesWithIntrinsicBounds(0, 0, android.R.drawable.ic_menu_recent_history, 0);
+        e.setOnClickListener(v -> {
+            LocalTime initial = LocalTime.now();
+            try { initial = LocalTime.parse(e.getText().toString().trim(), BREW_TIME_FORMAT); }
+            catch (Exception ignored) { }
+            new TimePickerDialog(this, (picker, hour, minute) ->
+                    e.setText(String.format(Locale.CHINA, "%02d:%02d", hour, minute)),
+                    initial.getHour(), initial.getMinute(), true).show();
+        });
+        return e;
+    }
+
+    private EditText durationPickerInput(String value) {
+        EditText e = input("萃取时间", value);
+        e.setInputType(InputType.TYPE_NULL);
+        e.setFocusable(false);
+        e.setCursorVisible(false);
+        e.setCompoundDrawablesWithIntrinsicBounds(0, 0, android.R.drawable.ic_menu_recent_history, 0);
+        e.setOnClickListener(v -> {
+            int minutes = 2;
+            int seconds = 30;
+            try {
+                String[] parts = e.getText().toString().trim().split(":");
+                minutes = Math.max(0, Math.min(30, Integer.parseInt(parts[0])));
+                if (parts.length > 1) seconds = Math.max(0, Math.min(59, Integer.parseInt(parts[1])));
+            } catch (Exception ignored) { }
+
+            LinearLayout pickers = new LinearLayout(this);
+            pickers.setGravity(Gravity.CENTER);
+            pickers.setPadding(dp(18), dp(4), dp(18), dp(4));
+            NumberPicker minutePicker = new NumberPicker(this);
+            minutePicker.setMinValue(0);
+            minutePicker.setMaxValue(30);
+            minutePicker.setValue(minutes);
+            NumberPicker secondPicker = new NumberPicker(this);
+            secondPicker.setMinValue(0);
+            secondPicker.setMaxValue(59);
+            secondPicker.setValue(seconds);
+            pickers.addView(minutePicker, new LinearLayout.LayoutParams(0, dp(160), 1));
+            TextView colon = text(":", 22, INK, true);
+            colon.setGravity(Gravity.CENTER);
+            pickers.addView(colon, new LinearLayout.LayoutParams(dp(24), dp(160)));
+            pickers.addView(secondPicker, new LinearLayout.LayoutParams(0, dp(160), 1));
+            new AlertDialog.Builder(this)
+                    .setTitle("选择萃取时间（分 : 秒）")
+                    .setView(pickers)
+                    .setPositiveButton("确定", (d, w) -> e.setText(String.format(Locale.CHINA, "%d:%02d", minutePicker.getValue(), secondPicker.getValue())))
+                    .setNegativeButton("取消", null)
+                    .show();
+        });
+        return e;
+    }
+
+    private void syncBrewDraft(BrewInputs inputs, EditText dose, EditText water, EditText temp,
+                               EditText extractionTime, EditText brewTime, EditText note, ImageUploadField images) {
+        brewDraft.method = inputs.method;
+        brewDraft.grinder = inputs.grinder;
+        brewDraft.grindDial = inputs.grindDial;
+        brewDraft.grind = formatGrind(inputs.grinder, inputs.grindDial);
+        brewDraft.score = inputs.score;
+        brewDraft.noteTags = new ArrayList<>(inputs.noteTags);
+        brewDraft.dose = dose.getText().toString();
+        brewDraft.water = water.getText().toString();
+        brewDraft.temp = temp.getText().toString();
+        brewDraft.extractionTime = extractionTime.getText().toString();
+        brewDraft.brewTime = brewTime.getText().toString();
+        brewDraft.note = note.getText().toString();
+        brewDraft.images = new ArrayList<>(images.images);
     }
 
     private void showBeanTypeDialog(TextView trigger, String[] selectedBeanTypes) {
@@ -2689,7 +3268,7 @@ public class MainActivity extends Activity {
 
     private EditText bestBeforeInput(EditText roastDate, String value) {
         String initial = isBlank(value) ? bestBeforeFrom(roastDate.getText().toString()) : value;
-        EditText e = input("赏味期限 yyyy-MM-dd", initial);
+        EditText e = datePickerInput("赏味期限", initial, false);
         final String[] lastAuto = {isBlank(value) ? initial : ""};
         roastDate.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
@@ -2845,7 +3424,7 @@ public class MainActivity extends Activity {
         LocalDate now = LocalDate.now();
         long roastDay = ChronoUnit.DAYS.between(date(bean.roastDate), now);
         long daysLeft = ChronoUnit.DAYS.between(now, date(cleanBestBefore(bean)));
-        if (roastDay < 7) return "养豆中";
+        if (roastDay < bean.restDays) return "养豆中";
         if (daysLeft >= 0) return "黄金期";
         if (daysLeft >= -25) return "尾段";
         return "过峰值";
@@ -3111,6 +3690,7 @@ public class MainActivity extends Activity {
         String purchaseDate;
         String roastDate;
         String openDate;
+        int restDays = 7;
         String bestBeforeDate;
         List<Bean> batches;
 
@@ -3136,6 +3716,7 @@ public class MainActivity extends Activity {
             b.purchaseDate = purchaseDate;
             b.roastDate = roastDate;
             b.openDate = openDate;
+            b.restDays = restDays;
             b.bestBeforeDate = bestBeforeDate;
             if (batches != null) b.batches = new ArrayList<>(batches);
             return b;
@@ -3240,18 +3821,36 @@ public class MainActivity extends Activity {
     static class BrewInputs {
         String method;
         String grind;
+        String grinder;
+        String grindDial;
         int score;
         List<String> noteTags;
     }
 
+    static class BrewDraft {
+        String method = "手冲";
+        String grind = "未记录";
+        String grinder = "";
+        String grindDial = "";
+        int score = 3;
+        String dose = "15";
+        String water = "240";
+        String temp = "92";
+        String extractionTime = "2:30";
+        String brewTime = "";
+        String note = "";
+        List<String> noteTags = new ArrayList<>();
+        List<String> images = new ArrayList<>();
+    }
+
     static class CoffeeDb extends SQLiteOpenHelper {
         CoffeeDb(Context context) {
-            super(context, "coffee_cellar.db", null, 11);
+            super(context, "coffee_cellar.db", null, 12);
         }
 
         @Override
         public void onCreate(SQLiteDatabase db) {
-            db.execSQL("CREATE TABLE beans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,roaster TEXT,bean_type TEXT,is_blend INTEGER DEFAULT 0,is_single_origin INTEGER DEFAULT 0,origin TEXT,process TEXT,roast_level TEXT,flavor_tags TEXT,blend_details TEXT,image_uris TEXT,package_image_uris TEXT,bean_image_uris TEXT,total_gram REAL,remaining_gram REAL,price REAL,purchase_date TEXT,roast_date TEXT,open_date TEXT,best_before_date TEXT)");
+            db.execSQL("CREATE TABLE beans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,roaster TEXT,bean_type TEXT,is_blend INTEGER DEFAULT 0,is_single_origin INTEGER DEFAULT 0,origin TEXT,process TEXT,roast_level TEXT,flavor_tags TEXT,blend_details TEXT,image_uris TEXT,package_image_uris TEXT,bean_image_uris TEXT,total_gram REAL,remaining_gram REAL,price REAL,purchase_date TEXT,roast_date TEXT,open_date TEXT,rest_days INTEGER DEFAULT 7,best_before_date TEXT)");
             db.execSQL("CREATE TABLE brews(id INTEGER PRIMARY KEY AUTOINCREMENT,bean_id INTEGER,date TEXT,brew_time TEXT,method TEXT,dose REAL,water REAL,grind TEXT,temp INTEGER,time TEXT,score REAL,note TEXT,image_uris TEXT)");
         }
 
@@ -3283,6 +3882,7 @@ public class MainActivity extends Activity {
             if (oldVersion < 9) db.execSQL("ALTER TABLE beans ADD COLUMN blend_details TEXT");
             if (oldVersion < 10) db.execSQL("ALTER TABLE beans ADD COLUMN is_blend INTEGER DEFAULT 0");
             if (oldVersion < 11) db.execSQL("ALTER TABLE beans ADD COLUMN is_single_origin INTEGER DEFAULT 0");
+            if (oldVersion < 12) db.execSQL("ALTER TABLE beans ADD COLUMN rest_days INTEGER DEFAULT 7");
         }
 
         void seedIfEmpty() {
@@ -3315,6 +3915,7 @@ public class MainActivity extends Activity {
             bean.purchaseDate = purchaseDate;
             bean.roastDate = roastDate;
             bean.openDate = openDate;
+            bean.restDays = 7;
             bean.bestBeforeDate = parse(roastDate).plusDays(45).toString();
             return addBean(bean);
         }
@@ -3382,6 +3983,7 @@ public class MainActivity extends Activity {
             v.put("purchase_date", clean(bean.purchaseDate, LocalDate.now().toString()));
             v.put("roast_date", clean(bean.roastDate, LocalDate.now().toString()));
             v.put("open_date", cleanOptional(bean.openDate));
+            v.put("rest_days", Math.max(bean.restDays, 0));
             v.put("best_before_date", clean(bean.bestBeforeDate, parse(bean.roastDate).plusDays(45).toString()));
         }
 
@@ -3408,11 +4010,26 @@ public class MainActivity extends Activity {
             db.execSQL("UPDATE beans SET remaining_gram = MAX(0, remaining_gram - ?) WHERE id = ?", new Object[]{dose, beanId});
         }
 
-        void updateBrewDateTime(long brewId, String date, String brewTime) {
+        void updateBrewDetails(long brewId, String date, String brewTime, String method, double score) {
             ContentValues v = new ContentValues();
             v.put("date", cleanBrewDate(date));
             v.put("brew_time", cleanBrewTime(brewTime));
+            v.put("method", clean(method, "手冲"));
+            v.put("score", Math.max(0, Math.min(6, score)));
             getWritableDatabase().update("brews", v, "id = ?", new String[]{String.valueOf(brewId)});
+        }
+
+        void deleteBrewAndRestoreStock(long brewId, long beanId, double dose) {
+            SQLiteDatabase db = getWritableDatabase();
+            db.beginTransaction();
+            try {
+                db.delete("brews", "id = ?", new String[]{String.valueOf(brewId)});
+                db.execSQL("UPDATE beans SET remaining_gram = MIN(total_gram, remaining_gram + ?) WHERE id = ?",
+                        new Object[]{Math.max(0, dose), beanId});
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
+            }
         }
 
         void moveBrewToBean(long brewId, long oldBeanId, long newBeanId, double dose) {
@@ -3456,6 +4073,21 @@ public class MainActivity extends Activity {
                 }
             }
             return groups;
+        }
+
+        List<ChartItem> remainingBeanRank() {
+            List<Bean> groups = beanGroups();
+            Collections.sort(groups, (a, b) -> {
+                int remaining = Double.compare(b.remainingGram, a.remainingGram);
+                return remaining != 0 ? remaining : a.name.compareToIgnoreCase(b.name);
+            });
+            List<ChartItem> out = new ArrayList<>();
+            for (Bean bean : groups) {
+                if (bean.remainingGram <= 0) continue;
+                out.add(new ChartItem(bean.name, bean.remainingGram));
+                if (out.size() >= 5) break;
+            }
+            return out;
         }
 
         List<Bean> beansByPriority() {
@@ -3514,6 +4146,17 @@ public class MainActivity extends Activity {
             Cursor c = getReadableDatabase().rawQuery(
                     "SELECT brews.*, beans.name AS bean_name FROM brews JOIN beans ON beans.id = brews.bean_id WHERE date >= ? ORDER BY date DESC, brew_time DESC, brews.id DESC LIMIT 50",
                     new String[]{since.toString()});
+            List<Brew> out = new ArrayList<>();
+            while (c.moveToNext()) out.add(readBrew(c));
+            c.close();
+            return out;
+        }
+
+        List<Brew> brewsWithImages() {
+            Cursor c = getReadableDatabase().rawQuery(
+                    "SELECT brews.*, beans.name AS bean_name FROM brews JOIN beans ON beans.id = brews.bean_id " +
+                            "WHERE brews.image_uris IS NOT NULL AND length(trim(brews.image_uris)) > 0 " +
+                            "ORDER BY date DESC, brew_time DESC, brews.id DESC", null);
             List<Brew> out = new ArrayList<>();
             while (c.moveToNext()) out.add(readBrew(c));
             c.close();
@@ -3635,18 +4278,14 @@ public class MainActivity extends Activity {
 
         List<ChartItem> roastLevelCounts() {
             List<ChartItem> out = new ArrayList<>();
-            Cursor c = getReadableDatabase().rawQuery("SELECT roast_level, COUNT(*) FROM beans GROUP BY roast_level ORDER BY COUNT(*) DESC, roast_level LIMIT 6", null);
-            while (c.moveToNext()) out.add(new ChartItem(clean(c.getString(0), "未知烘焙"), c.getInt(1)));
-            c.close();
-            return out;
+            for (Bean bean : beanGroups()) incrementChart(out, clean(bean.roastLevel, "未知烘焙"));
+            return sortedChartItems(out, 6);
         }
 
         List<ChartItem> beanTypeCounts() {
             List<ChartItem> out = new ArrayList<>();
-            Cursor c = getReadableDatabase().rawQuery("SELECT bean_type, COUNT(*) FROM beans GROUP BY bean_type ORDER BY COUNT(*) DESC, bean_type LIMIT 6", null);
-            while (c.moveToNext()) out.add(new ChartItem(shortBeanType(clean(c.getString(0), DEFAULT_BEAN_TYPE)), c.getInt(1)));
-            c.close();
-            return out;
+            for (Bean bean : beanGroups()) incrementChart(out, shortBeanType(clean(bean.beanType, DEFAULT_BEAN_TYPE)));
+            return sortedChartItems(out, 6);
         }
 
         List<ChartItem> priceBuckets() {
@@ -3685,22 +4324,33 @@ public class MainActivity extends Activity {
 
         List<ChartItem> originCounts() {
             List<ChartItem> out = new ArrayList<>();
-            Cursor c = getReadableDatabase().rawQuery("SELECT origin FROM beans", null);
-            while (c.moveToNext()) {
-                String[] origins = clean(c.getString(0), "未知产区").split("[,，、;；/&]+");
+            for (Bean bean : beanGroups()) {
+                String[] origins = clean(bean.origin, "未知产区").split("[,，、;；/&]+");
                 for (String origin : origins) {
                     String name = origin.trim();
                     if (name.isEmpty()) continue;
-                    ChartItem found = null;
-                    for (ChartItem item : out) if (item.label.equals(name)) { found = item; break; }
-                    if (found == null) out.add(new ChartItem(name, 1));
-                    else found.value++;
+                    incrementChart(out, name);
                 }
             }
-            c.close();
-            Collections.sort(out, (a, b) -> Double.compare(b.value, a.value));
-            if (out.size() > 8) return new ArrayList<>(out.subList(0, 8));
-            return out;
+            return sortedChartItems(out, 8);
+        }
+
+        private void incrementChart(List<ChartItem> items, String label) {
+            for (ChartItem item : items) {
+                if (item.label.equals(label)) {
+                    item.value++;
+                    return;
+                }
+            }
+            items.add(new ChartItem(label, 1));
+        }
+
+        private List<ChartItem> sortedChartItems(List<ChartItem> items, int limit) {
+            Collections.sort(items, (a, b) -> {
+                int value = Double.compare(b.value, a.value);
+                return value != 0 ? value : a.label.compareTo(b.label);
+            });
+            return items.size() > limit ? new ArrayList<>(items.subList(0, limit)) : items;
         }
 
         LocalDate lastBrewDate(long[] beanIds) {
@@ -3743,20 +4393,20 @@ public class MainActivity extends Activity {
             while (c.moveToNext()) {
                 double score = c.getDouble(0);
                 int index;
-                if (score < 2) index = 0;
-                else if (score < 3) index = 1;
-                else if (score < 4) index = 2;
+                if (score < 1.5) index = 0;
+                else if (score < 2.5) index = 1;
+                else if (score < 3.5) index = 2;
                 else if (score < 4.5) index = 3;
                 else index = 4;
                 buckets[index]++;
             }
             c.close();
             List<ChartItem> out = new ArrayList<>();
-            out.add(new ChartItem("<2", buckets[0]));
-            out.add(new ChartItem("2-3", buckets[1]));
-            out.add(new ChartItem("3-4", buckets[2]));
-            out.add(new ChartItem("4-4.5", buckets[3]));
-            out.add(new ChartItem("4.5+", buckets[4]));
+            out.add(new ChartItem("0-1 · 无法接受/可以接受", buckets[0]));
+            out.add(new ChartItem("2 · 普通", buckets[1]));
+            out.add(new ChartItem("3 · 好", buckets[2]));
+            out.add(new ChartItem("4 · 很好", buckets[3]));
+            out.add(new ChartItem("5-6 · 优秀/格外出众", buckets[4]));
             return out;
         }
 
@@ -3784,7 +4434,7 @@ public class MainActivity extends Activity {
                 if (b.remainingGram <= 0) continue;
                 long roastDays = ChronoUnit.DAYS.between(parse(b.roastDate), now);
                 long bestDaysLeft = ChronoUnit.DAYS.between(now, parse(clean(b.bestBeforeDate, parse(b.roastDate).plusDays(45).toString())));
-                if (roastDays == 7) out.add(b.name + " 养豆完成，今天可以开始认真喝");
+                if (roastDays == b.restDays) out.add(b.name + " 养豆完成，今天可以开始认真喝");
                 if (bestDaysLeft < 0) out.add(b.name + " 已过赏味期限，建议优先消耗");
                 else if (bestDaysLeft <= 7) out.add(b.name + " 距离赏味期限还剩 " + bestDaysLeft + " 天");
                 if (!isBlank(b.openDate)) {
@@ -3801,6 +4451,32 @@ public class MainActivity extends Activity {
             List<Bean> out = new ArrayList<>();
             while (c.moveToNext()) out.add(readBean(c));
             c.close();
+            return out;
+        }
+
+        List<String> beanFieldValues(String column) {
+            if (!("roaster".equals(column) || "origin".equals(column) || "process".equals(column) || "roast_level".equals(column) || "flavor_tags".equals(column))) {
+                return new ArrayList<>();
+            }
+            Cursor c = getReadableDatabase().rawQuery("SELECT DISTINCT " + column + " FROM beans WHERE " + column + " IS NOT NULL AND TRIM(" + column + ") != '' ORDER BY " + column, null);
+            List<String> out = new ArrayList<>();
+            while (c.moveToNext()) {
+                String value = c.getString(0);
+                if (!isBlank(value)) out.add(value);
+            }
+            c.close();
+            return out;
+        }
+
+        List<String> beanMultiFieldValues(String column) {
+            if (!("origin".equals(column) || "flavor_tags".equals(column))) return new ArrayList<>();
+            List<String> out = new ArrayList<>();
+            for (String raw : beanFieldValues(column)) {
+                for (String value : raw.split("[,，、]+")) {
+                    String cleaned = value.trim();
+                    if (!isBlank(cleaned) && !out.contains(cleaned)) out.add(cleaned);
+                }
+            }
             return out;
         }
 
@@ -3837,6 +4513,7 @@ public class MainActivity extends Activity {
             b.purchaseDate = c.getString(c.getColumnIndexOrThrow("purchase_date"));
             b.roastDate = c.getString(c.getColumnIndexOrThrow("roast_date"));
             b.openDate = cleanOptional(c.getString(c.getColumnIndexOrThrow("open_date")));
+            b.restDays = Math.max(0, c.getInt(c.getColumnIndexOrThrow("rest_days")));
             b.bestBeforeDate = clean(c.getString(c.getColumnIndexOrThrow("best_before_date")), parse(b.roastDate).plusDays(45).toString());
             return b;
         }
